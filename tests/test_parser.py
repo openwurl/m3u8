@@ -407,9 +407,10 @@ def test_should_parse_scte35_from_playlist():
     expected_scte35 = [None, None, None, cue, cue, cue, cue, cue, cue, cue, None]
     assert actual_scte35 == expected_scte35
 
-    # oatcls_scte35 should be maintained from [EXT-X-CUE-OUT, EXT-X-CUE-IN]
+    # oatcls_scte35 should be maintained until it changes
+    oat = '/DA2AAAAAAAAAP/wBQb//vOoWQAgAh5DVUVJbpFcxn+/DA9XVVJMRDAwMDAwMzU4NTkQAAA5VeXi'
     actual_oatcls_scte35 = [s["oatcls_scte35"] for s in data["segments"]]
-    expected_oatcls_scte35 = [None, None, None, cue, cue, cue, cue, cue, cue, cue, None]
+    expected_oatcls_scte35 = [None, None, None, cue, cue, cue, cue, cue, oat, oat, None]
     assert actual_oatcls_scte35 == expected_oatcls_scte35
 
     # durations should be maintained from  from [EXT-X-CUE-OUT, EXT-X-CUE-IN]

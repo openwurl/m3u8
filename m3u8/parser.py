@@ -730,7 +730,8 @@ def _parse_content_steering(line, data, **kwargs):
 def _parse_oatcls_scte35(line, state, **kwargs):
     scte35_cue = line.split(":", 1)[1]
     state["current_cue_out_oatcls_scte35"] = scte35_cue
-    state["current_cue_out_scte35"] = scte35_cue
+    if not state.get("current_cue_out_scte35"):
+        state["current_cue_out_scte35"] = scte35_cue
 
 
 def _parse_asset(line, state, **kwargs):

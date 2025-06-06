@@ -185,10 +185,15 @@ def test_segment_oatcls_scte35_cue_out_dumps():
     result = obj.dumps()
 
     # Check OATCLS-SCTE35 for CUE-OUT lines
-    cue_out_line = (
+    oatcls_1_line = (
         "#EXT-OATCLS-SCTE35:/DAlAAAAAAAAAP/wFAUAAAABf+//wpiQkv4ARKogAAEBAQAAQ6sodg==\n"
     )
-    assert result.count(cue_out_line) == 1
+    assert result.count(oatcls_1_line) == 5
+    oatcls_2_line = (
+        "#EXT-OATCLS-SCTE35:/DA2AAAAAAAAAP/wBQb//vOoWQAgAh5DVUVJbpFcxn+/"
+        "DA9XVVJMRDAwMDAwMzU4NTkQAAA5VeXi\n"
+    )
+    assert result.count(oatcls_2_line) == 1
 
 
 def test_segment_oatcls_scte35_non_cue_out_dumps():

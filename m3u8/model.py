@@ -645,6 +645,8 @@ class Segment(BasePathMixin):
             else:
                 cue_out_cont_suffix = ""
             output.append(f"#EXT-X-CUE-OUT-CONT{cue_out_cont_suffix}\n")
+            if self.oatcls_scte35:
+                output.append(f"{ext_oatcls_scte35}:{self.oatcls_scte35}\n")
         elif self.cue_in:
             output.append("#EXT-X-CUE-IN\n")
         elif self.oatcls_scte35:
