@@ -180,22 +180,6 @@ def test_segment_cue_out_cont_attributes_dumps():
     assert expected in result
 
 
-def test_segment_oatcls_scte35_cue_out_dumps():
-    obj = m3u8.M3U8(playlists.CUE_OUT_ELEMENTAL_PLAYLIST)
-    result = obj.dumps()
-
-    # Check OATCLS-SCTE35 for CUE-OUT lines
-    oatcls_1_line = (
-        "#EXT-OATCLS-SCTE35:/DAlAAAAAAAAAP/wFAUAAAABf+//wpiQkv4ARKogAAEBAQAAQ6sodg==\n"
-    )
-    assert result.count(oatcls_1_line) == 5
-    oatcls_2_line = (
-        "#EXT-OATCLS-SCTE35:/DA2AAAAAAAAAP/wBQb//vOoWQAgAh5DVUVJbpFcxn+/"
-        "DA9XVVJMRDAwMDAwMzU4NTkQAAA5VeXi\n"
-    )
-    assert result.count(oatcls_2_line) == 1
-
-
 def test_segment_oatcls_scte35_non_cue_out_dumps():
     obj = m3u8.M3U8(playlists.OATCLS_ELEMENTAL_PLAYLIST)
     result = obj.dumps()
@@ -203,6 +187,24 @@ def test_segment_oatcls_scte35_non_cue_out_dumps():
     # Check OATCLS-SCTE35 for non-CUE-OUT lines
     cue_out_line = "/DAqAAAAAyiYAP/wBQb/FuaKGAAUAhJDVUVJAAAFp3+/EQMCRgIMAQF7Ny4D\n"
     assert result.count(cue_out_line) == 1
+
+
+def test_oatcls_extended():
+    obj = m3u8.M3U8(playlists.OATCLS_EXTENDED_PLAYLIST)
+
+    actual = []
+    for i, line in enumerate(obj.dumps().splitlines()):
+        if line.startswith("#EXT-OATCLS-SCTE35:"):
+            actual.append((i, line[19:]))
+
+    expected = [
+        (6, "/DAlAAAAAAAAAP/wFAUbus/gf+/+UsdkQv4ApPWwAAEBAQAAj5YQOw=="),
+        (
+            17,
+            "/DA7AAAAAAAAAP/wBQb+U2xZ8gAlAiNDVUVJ92lrqX+/DBRBTUNOQU1DTlZSMDAwMDA2NjYwMhAAAJi60Tw=",
+        ),
+    ]
+    assert actual == expected
 
 
 def test_segment_cue_out_start_dumps():
