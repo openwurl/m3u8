@@ -790,6 +790,22 @@ def test_gap_in_parts():
     assert data["segments"][0]["parts"][2].get("gap", None) is None
 
 
+def test_blackout_simple():
+    data = m3u8.parse(playlists.BLACKOUT_SIMPLE_PLAYLIST)
+
+    assert data["segments"][0]["blackout"] is None
+    assert data["segments"][1]["blackout"] is True
+    assert data["segments"][2]["blackout"] is None
+
+
+def test_blackout_with_params():
+    data = m3u8.parse(playlists.BLACKOUT_WITH_PARAMS_PLAYLIST)
+
+    assert data["segments"][0]["blackout"] is None
+    assert data["segments"][1]["blackout"] == "ID=12345,DURATION=30.0"
+    assert data["segments"][2]["blackout"] is None
+
+
 def test_should_parse_variant_playlist_with_iframe_with_average_bandwidth():
     data = m3u8.parse(playlists.VARIANT_PLAYLIST_WITH_IFRAME_AVERAGE_BANDWIDTH)
     iframe_playlists = list(data["iframe_playlists"])
