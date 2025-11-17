@@ -1575,7 +1575,7 @@ def test_add_blackout_simple():
     obj = m3u8.Segment(uri="segment.ts", duration=4, blackout=True)
 
     result = str(obj)
-    expected = "#EXT-X-BLACKOUT\n#EXTINF:9.9,\nsegment.ts"
+    expected = "#EXT-X-BLACKOUT\n#EXTINF:4,\nsegment.ts"
 
     assert result == expected
 
@@ -1586,7 +1586,7 @@ def test_add_blackout_with_params():
     )
 
     result = str(obj)
-    expected = "#EXT-X-BLACKOUT:ID=12345,DURATION=30.0\n#EXTINF:9.9,\nsegment.ts"
+    expected = "#EXT-X-BLACKOUT:ID=12345,DURATION=30.0\n#EXTINF:4,\nsegment.ts"
 
     assert result == expected
 
