@@ -1571,6 +1571,44 @@ def test_gap_in_parts():
     assert result == expected
 
 
+def test_add_blackout_simple():
+    obj = m3u8.Segment(uri="segment.ts", duration=4, blackout=True)
+
+    result = str(obj)
+    expected = "#EXT-X-BLACKOUT\n#EXTINF:9.9,\nsegment.ts"
+
+    assert result == expected
+
+
+def test_add_blackout_with_params():
+    obj = m3u8.Segment(
+        uri="segment.ts", duration=4, blackout="ID=12345,DURATION=30.0"
+    )
+
+    result = str(obj)
+    expected = "#EXT-X-BLACKOUT:ID=12345,DURATION=30.0\n#EXTINF:9.9,\nsegment.ts"
+
+    assert result == expected
+
+
+def test_blackout_simple():
+    obj = m3u8.M3U8(playlists.BLACKOUT_SIMPLE_PLAYLIST)
+
+    result = obj.dumps().strip()
+    expected = playlists.BLACKOUT_SIMPLE_PLAYLIST.strip()
+
+    assert result == expected
+
+
+def test_blackout_with_params():
+    obj = m3u8.M3U8(playlists.BLACKOUT_WITH_PARAMS_PLAYLIST)
+
+    result = obj.dumps().strip()
+    expected = playlists.BLACKOUT_WITH_PARAMS_PLAYLIST.strip()
+
+    assert result == expected
+
+
 def test_skip_dateranges():
     obj = m3u8.M3U8(playlists.DELTA_UPDATE_SKIP_DATERANGES_PLAYLIST)
 
