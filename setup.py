@@ -14,15 +14,15 @@ install_reqs = [
 setup(
     name="m3u8",
     author="Globo.com",
-    version="6.2.1",
+    version="6.3.0",
     license="MIT",
     zip_safe=False,
     include_package_data=True,
     install_requires=install_reqs,
     packages=["m3u8"],
-    url="https://github.com/globocom/m3u8",
+    url="https://github.com/openwurl/m3u8",
     description="Python m3u8 parser",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    python_requires=">=3.9",
+    python_requires=">=3.10",
 )

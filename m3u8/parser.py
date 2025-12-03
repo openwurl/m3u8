@@ -199,6 +199,7 @@ def _parse_ts_chunk(line, data, state, **kwargs):
         segment["init_section"] = state["current_segment_map"]
     segment["dateranges"] = state.pop("dateranges", None)
     segment["gap_tag"] = state.pop("gap", None)
+    segment["blackout"] = state.pop("blackout", None)
     data["segments"].append(segment)
     state["expect_segment"] = False
 
@@ -360,6 +361,18 @@ def _parse_start(line, data, **kwargs):
 
 def _parse_gap(state, **kwargs):
     state["gap"] = True
+
+
+def _parse_blackout(line, state, **kwargs):
+    # Store the full tag content to pass through unmodified
+    # Extract everything after "#EXT-X-BLACKOUT"
+    if ":" in line:
+        # Tag has parameters: #EXT-X-BLACKOUT:params
+        blackout_data = line.split(":", 1)[1]
+    else:
+        # Tag has no parameters, just store True
+        blackout_data = True
+    state["blackout"] = blackout_data
 
 
 def _parse_simple_parameter_raw_value(line, cast_to=str, normalize=False, **kwargs):
@@ -768,4 +781,5 @@ DISPATCH = {
     protocol.ext_x_image_stream_inf: _parse_image_stream_inf,
     protocol.ext_x_images_only: _parse_is_images_only,
     protocol.ext_x_tiles: _parse_tiles,
+    protocol.ext_x_blackout: _parse_blackout,
 }

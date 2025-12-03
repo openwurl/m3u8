@@ -518,6 +518,9 @@ class Segment(BasePathMixin):
     `gap_tag`
       GAP tag indicates that a Media Segment is missing
 
+    `blackout`
+      indicates program changes
+
     `custom_parser_values`
         Additional values which custom_tags_parser might store per segment
     """
@@ -548,6 +551,7 @@ class Segment(BasePathMixin):
         init_section=None,
         dateranges=None,
         gap_tag=None,
+        blackout=None,
         media_sequence=None,
         custom_parser_values=None,
     ):
@@ -584,6 +588,7 @@ class Segment(BasePathMixin):
             [DateRange(**daterange) for daterange in dateranges] if dateranges else []
         )
         self.gap_tag = gap_tag
+        self.blackout = blackout
         self.custom_parser_values = custom_parser_values or {}
 
     def add_part(self, part):
@@ -663,6 +668,14 @@ class Segment(BasePathMixin):
         if self.parts:
             output.append(str(self.parts))
             output.append("\n")
+
+        if self.blackout:
+            if self.blackout is True:
+                # tag without parameters
+                output.append("#EXT-X-BLACKOUT\n")
+            else:
+                # tag with parameters
+                output.append(f"#EXT-X-BLACKOUT:{self.blackout}\n")
 
         if self.uri:
             if self.duration is not None:
