@@ -17,11 +17,14 @@ install_reqs = [
 # Only build on Mac and Linux, and allow skipping via environment variable
 ext_modules = []
 
+# For a single wheel across CPython minor versions, build against the stable ABI
+# (abi3). Since python_requires is >=3.10, we can target the 3.10 limited API.
+PY_LIMITED_API = "0x030A0000"
+
 # Check if we should build the C extension
-build_c_extension = (
-    sys.platform in ("darwin", "linux")
-    and os.environ.get("M3U8_NO_C_EXTENSION", "").lower() not in ("1", "true", "yes")
-)
+build_c_extension = sys.platform in ("darwin", "linux") and os.environ.get(
+    "M3U8_NO_C_EXTENSION", ""
+).lower() not in ("1", "true", "yes")
 
 if build_c_extension:
     ext_modules.append(
@@ -29,6 +32,8 @@ if build_c_extension:
             "m3u8._m3u8_parser",
             sources=["m3u8/_m3u8_parser.c"],
             optional=True,  # Don't fail the build if extension compilation fails
+            py_limited_api=True,
+            define_macros=[("Py_LIMITED_API", PY_LIMITED_API)],
         )
     )
 
