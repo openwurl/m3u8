@@ -34,10 +34,13 @@ from m3u8.model import (
 from m3u8.parser import ParseError
 
 # Try to import the C extension for faster parsing, fall back to Python
-try:
-    from m3u8._m3u8_parser import parse
-except ImportError:
+if os.environ.get("M3U8_NO_C_EXTENSION", "") == "1":
     from m3u8.parser import parse
+else:
+    try:
+        from m3u8._m3u8_parser import parse
+    except ImportError:
+        from m3u8.parser import parse
 
 __all__ = (
     "M3U8",

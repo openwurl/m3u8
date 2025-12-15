@@ -61,6 +61,12 @@ Py_XNewRef(PyObject *obj)
 #endif
 
 /*
+ * Forward declarations for inline helpers used before their definitions.
+ */
+static inline int dict_set_interned(PyObject *dict, PyObject *interned_key, PyObject *value);
+static inline PyObject *dict_get_interned(PyObject *dict, PyObject *interned_key);
+
+/*
  * Helper macro for setting dict items with proper error handling.
  * Decrefs value and returns/gotos on failure.
  */
@@ -307,16 +313,12 @@ raise_parse_error(m3u8_state *state, int lineno, const char *line)
         return;
     }
 
-    PyObject *args = PyTuple_New(2);
+    PyObject *args = PyTuple_Pack(2, py_lineno, py_line);
+    Py_DECREF(py_lineno);
+    Py_DECREF(py_line);
     if (args == NULL) {
-        Py_DECREF(py_lineno);
-        Py_DECREF(py_line);
         return;
     }
-
-    /* PyTuple_SET_ITEM steals references - no DECREF needed after this */
-    PyTuple_SET_ITEM(args, 0, py_lineno);
-    PyTuple_SET_ITEM(args, 1, py_line);
 
     PyObject *exc = PyObject_Call(state->ParseError, args, NULL);
     Py_DECREF(args);
@@ -391,88 +393,6 @@ static int del_item_string_ignore_keyerror(PyObject *dict, const char *key) {
         return 0;
     }
     return -1;
-}
-
-/*
- * Safe dict getter that distinguishes between "key not found" and errors.
- * Returns borrowed reference on success (including NULL for missing key).
- * Sets *found = 1 if key exists, *found = 0 if missing.
- * Returns NULL with exception set on error (check with PyErr_Occurred()).
- */
-static PyObject *
-dict_get_item_string_safe(PyObject *dict, const char *key, int *found)
-{
-    PyObject *py_key = PyUnicode_FromString(key);
-    if (py_key == NULL) {
-        *found = 0;
-        return NULL;
-    }
-
-    PyObject *value = PyDict_GetItemWithError(dict, py_key);
-    Py_DECREF(py_key);
-
-    if (value != NULL) {
-        *found = 1;
-        return value;  /* borrowed reference */
-    }
-
-    *found = 0;
-    /* value is NULL - check if it's an error or just missing */
-    return NULL;
-}
-
-/*
- * Get a dict value from state, creating a new empty dict if not present.
- * Returns borrowed reference to the dict on success.
- * Returns NULL with exception set on failure.
- *
- * This is a common pattern: get state["segment"], creating if needed.
- */
-static PyObject *
-state_get_or_create_dict(PyObject *state, const char *key)
-{
-    PyObject *value = PyDict_GetItemString(state, key);
-    if (value != NULL) {
-        return value;  /* borrowed reference */
-    }
-    /* Not found - create new dict */
-    value = PyDict_New();
-    if (value == NULL) {
-        return NULL;
-    }
-    if (PyDict_SetItemString(state, key, value) < 0) {
-        Py_DECREF(value);
-        return NULL;
-    }
-    Py_DECREF(value);
-    /* Return borrowed reference */
-    return PyDict_GetItemString(state, key);
-}
-
-/*
- * Get a list value from dict, creating a new empty list if not present.
- * Returns borrowed reference to the list on success.
- * Returns NULL with exception set on failure.
- */
-static PyObject *
-dict_get_or_create_list(PyObject *dict, const char *key)
-{
-    PyObject *value = PyDict_GetItemString(dict, key);
-    if (value != NULL) {
-        return value;  /* borrowed reference */
-    }
-    /* Not found - create new list */
-    value = PyList_New(0);
-    if (value == NULL) {
-        return NULL;
-    }
-    if (PyDict_SetItemString(dict, key, value) < 0) {
-        Py_DECREF(value);
-        return NULL;
-    }
-    Py_DECREF(value);
-    /* Return borrowed reference */
-    return PyDict_GetItemString(dict, key);
 }
 
 /*
@@ -713,29 +633,6 @@ datetime_add_seconds(m3u8_state *state, PyObject *dt, double secs)
     return new_dt;
 }
 
-/* Utility: normalize attribute name (replace - with _, lowercase) */
-static void normalize_attribute(const char * restrict src, char * restrict dst, size_t dst_size) {
-    size_t i = 0;
-    while (*src && i < dst_size - 1) {
-        if (*src == '-') {
-            dst[i] = '_';
-        } else {
-            dst[i] = tolower((unsigned char)*src);
-        }
-        src++;
-        i++;
-    }
-    /* Strip trailing whitespace */
-    while (i > 0 && isspace((unsigned char)dst[i-1])) i--;
-    dst[i] = '\0';
-    /* Strip leading whitespace */
-    char *start = dst;
-    while (isspace((unsigned char)*start)) start++;
-    if (start != dst) {
-        memmove(dst, start, strlen(start) + 1);
-    }
-}
-
 /*
  * Create normalized Python string directly from buffer (zero-copy optimization).
  *
@@ -802,22 +699,6 @@ static PyObject *remove_quotes(const char *str) {
         }
     }
     return PyUnicode_FromString(str);
-}
-
-/*
- * Remove quotes from a buffer with known length (zero-copy variant).
- * Returns new reference to Python string.
- */
-static PyObject *
-remove_quotes_from_buffer(const char *s, Py_ssize_t len)
-{
-    if (len >= 2) {
-        if ((s[0] == '"' && s[len - 1] == '"') ||
-            (s[0] == '\'' && s[len - 1] == '\'')) {
-            return PyUnicode_FromStringAndSize(s + 1, len - 2);
-        }
-    }
-    return PyUnicode_FromStringAndSize(s, len);
 }
 
 /*
@@ -1047,19 +928,30 @@ parse_attributes_with_schema(const char *start, const char *end,
             if (p < end && (*p == '"' || *p == '\'')) {
                 /* Quoted value */
                 char quote = *p++;
-                const char *val_start = p;
+                const char *full_start = p - 1;  /* include opening quote */
+                const char *val_start = p;       /* inside quotes */
                 while (p < end && *p != quote) {
                     p++;
                 }
-                Py_ssize_t val_len = p - val_start;
-                if (p < end) {
+                const char *val_end = p;         /* points at closing quote or end */
+                int has_closing_quote = (p < end && *p == quote);
+                Py_ssize_t val_len = val_end - val_start;
+                if (has_closing_quote) {
                     p++;  /* Skip closing quote */
                 }
 
-                /* For quoted values, strip quotes and convert based on type */
-                if (type == ATTR_QUOTED_STRING || type == ATTR_STRING) {
-                    /* Create string without quotes */
+                /*
+                 * Python parity:
+                 * - Known "quoted string" attributes use remove_quotes() => no quotes
+                 * - Unknown attributes keep the original token (including quotes)
+                 */
+                if (type == ATTR_QUOTED_STRING) {
                     py_val = PyUnicode_FromStringAndSize(val_start, val_len);
+                } else if (type == ATTR_STRING) {
+                    Py_ssize_t full_len = has_closing_quote
+                        ? (Py_ssize_t)((val_end - full_start) + 1)
+                        : (Py_ssize_t)(val_end - full_start);
+                    py_val = PyUnicode_FromStringAndSize(full_start, full_len);
                 } else if (type == ATTR_INT || type == ATTR_BANDWIDTH) {
                     /* Numeric inside quotes - parse directly */
                     char num_buf[64];
@@ -2019,6 +1911,23 @@ m3u8_parse(PyObject *module, PyObject *args, PyObject *kwargs)
         return NULL;
     }
 
+    /*
+     * Match parser.py's behavior: lines = content.strip().splitlines()
+     *
+     * The Python parser strips leading/trailing whitespace *before* splitting,
+     * which affects strict-mode error line numbers when the input has leading
+     * newlines (common with triple-quoted test fixtures).
+     */
+    const char *trimmed = content;
+    const char *trimmed_end = content + content_len;
+    while (trimmed < trimmed_end && isspace((unsigned char)*trimmed)) {
+        trimmed++;
+    }
+    while (trimmed_end > trimmed && isspace((unsigned char)*(trimmed_end - 1))) {
+        trimmed_end--;
+    }
+    Py_ssize_t trimmed_len = (Py_ssize_t)(trimmed_end - trimmed);
+
     /* Get module state for cached objects */
     m3u8_state *mod_state = get_m3u8_state(module);
 
@@ -2035,7 +1944,7 @@ m3u8_parse(PyObject *module, PyObject *args, PyObject *kwargs)
             return NULL;
         }
         /* Build list like parser.py: content.strip().splitlines() */
-        PyObject *lines_list = build_stripped_splitlines(content);
+        PyObject *lines_list = build_stripped_splitlines(trimmed);
         if (lines_list == NULL) {
             Py_DECREF(validate);
             Py_DECREF(version_matching);
@@ -2090,8 +1999,8 @@ m3u8_parse(PyObject *module, PyObject *args, PyObject *kwargs)
      * We use a single reusable line buffer for the null-terminated stripped line.
      * This avoids copying the entire content upfront (the strtok_r approach).
      */
-    const char *p = content;
-    const char *end = content + content_len;
+    const char *p = trimmed;
+    const char *end = trimmed + trimmed_len;
 
     /* Reusable line buffer - starts small, grows as needed */
     size_t line_buf_size = 256;
@@ -2641,10 +2550,6 @@ m3u8_parse(PyObject *module, PyObject *args, PyObject *kwargs)
 
     Py_DECREF(state);
     return data;
-
-fail:
-    Py_DECREF(data);
-    return NULL;
 }
 
 /* Module methods */
