@@ -897,6 +897,14 @@ def test_multiple_map_attributes():
     assert obj.segments[2].init_section.uri == "init3.mp4"
 
 
+def test_empty_map_tag():
+    obj = m3u8.M3U8(playlists.EMPTY_MAP_TAG_PLAYLIST)
+
+    # Empty MAP tag should not cause errors and segments should have no init_section
+    assert obj.segments[0].init_section is None
+    assert obj.segments[1].init_section is None
+
+
 def test_dump_should_include_multiple_map_attributes(tmpdir):
     obj = m3u8.M3U8(playlists.MULTIPLE_MAP_URI_PLAYLIST)
 
