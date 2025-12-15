@@ -60,11 +60,6 @@ Py_XNewRef(PyObject *obj)
 }
 #endif
 
-/* Cross-platform compatibility for Windows/MSVC */
-#ifdef _WIN32
-#define strtok_r strtok_s
-#endif
-
 /*
  * Helper macro for setting dict items with proper error handling.
  * Decrefs value and returns/gotos on failure.
@@ -158,6 +153,14 @@ typedef struct {
  * This structure reduces parameter passing between functions and makes
  * the parsing state explicit. All PyObject pointers in this struct are
  * borrowed references except where noted.
+ *
+ * Shadow State Optimization:
+ * Hot flags (expect_segment, expect_playlist) are kept in C variables
+ * to avoid dict lookup overhead in the main parsing loop. They are
+ * synced to the Python state dict only when needed:
+ * - Before calling custom_tags_parser (so callback sees current state)
+ * - After custom_tags_parser returns (in case it modified state)
+ * - At the end of parsing (for final state consistency)
  */
 typedef struct {
     m3u8_state *mod_state;   /* Module state (borrowed) */
@@ -165,7 +168,44 @@ typedef struct {
     PyObject *state;         /* Parser state dict (owned) */
     int strict;              /* Strict parsing mode flag */
     int lineno;              /* Current line number (1-based) */
+    /* Shadow state for hot flags - avoids dict lookups in main loop */
+    int expect_segment;      /* Shadow of state["expect_segment"] */
+    int expect_playlist;     /* Shadow of state["expect_playlist"] */
 } ParseContext;
+
+/*
+ * Sync shadow state TO Python dict (before custom_tags_parser or at end).
+ */
+static int
+sync_shadow_to_dict(ParseContext *ctx)
+{
+    m3u8_state *mod_state = ctx->mod_state;
+    if (dict_set_interned(ctx->state, mod_state->str_expect_segment,
+                          ctx->expect_segment ? Py_True : Py_False) < 0) {
+        return -1;
+    }
+    if (dict_set_interned(ctx->state, mod_state->str_expect_playlist,
+                          ctx->expect_playlist ? Py_True : Py_False) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
+/*
+ * Sync shadow state FROM Python dict (after custom_tags_parser modifies it).
+ */
+static void
+sync_shadow_from_dict(ParseContext *ctx)
+{
+    m3u8_state *mod_state = ctx->mod_state;
+    PyObject *val;
+
+    val = dict_get_interned(ctx->state, mod_state->str_expect_segment);
+    ctx->expect_segment = (val == Py_True);
+
+    val = dict_get_interned(ctx->state, mod_state->str_expect_playlist);
+    ctx->expect_playlist = (val == Py_True);
+}
 
 /* Forward declaration for module definition */
 static struct PyModuleDef m3u8_parser_module;
@@ -332,7 +372,10 @@ static int unicode_to_utf8_copy(PyObject *obj, char **out) {
 static char *strip(char *str) {
     while (isspace((unsigned char)*str)) str++;
     if (*str == '\0') return str;
-    char *end = str + strlen(str) - 1;
+    /* Safety: check length before computing end pointer to avoid UB */
+    size_t len = strlen(str);
+    if (len == 0) return str;
+    char *end = str + len - 1;
     while (end > str && isspace((unsigned char)*end)) end--;
     *(end + 1) = '\0';
     return str;
@@ -934,87 +977,253 @@ typedef struct {
     AttrType type;
 } AttrParser;
 
-static PyObject *parse_typed_attribute_list(const char *line, const char *prefix,
-                                            const AttrParser *parsers, size_t num_parsers) {
-    PyObject *raw_attrs = parse_attribute_list(line, prefix);
-    if (!raw_attrs) return NULL;
-
+/*
+ * Schema-aware attribute parser.
+ *
+ * This is the optimized version that converts values to their final types
+ * directly during parsing, avoiding the "double allocation" problem where
+ * we first create a Python string, then convert it to int/float.
+ *
+ * The schema (parsers array) tells us the expected type for each key,
+ * so we can parse directly to the correct Python type.
+ *
+ * Args:
+ *     start: Pointer to start of attribute list (after "TAG:")
+ *     end: Pointer to end of content
+ *     parsers: Array of AttrParser structs defining key->type mappings
+ *     num_parsers: Number of parsers in array
+ *
+ * Returns: New reference to dict on success, NULL with exception set.
+ */
+static PyObject *
+parse_attributes_with_schema(const char *start, const char *end,
+                             const AttrParser *parsers, size_t num_parsers)
+{
     PyObject *attrs = PyDict_New();
-    if (!attrs) {
-        Py_DECREF(raw_attrs);
+    if (attrs == NULL) {
         return NULL;
     }
 
-    /* Copy and convert attributes */
-    PyObject *key, *value;
-    Py_ssize_t pos = 0;
-    while (PyDict_Next(raw_attrs, &pos, &key, &value)) {
-        AttrType type = ATTR_STRING;
-
-        /* Find parser for this attribute */
-        for (size_t i = 0; i < num_parsers; i++) {
-            if (PyUnicode_Check(key) && PyUnicode_CompareWithASCIIString(key, parsers[i].name) == 0) {
-                type = parsers[i].type;
-                break;
-            }
+    const char *p = start;
+    while (p < end) {
+        /* Skip leading whitespace and commas */
+        while (p < end && (isspace((unsigned char)*p) || *p == ',')) {
+            p++;
+        }
+        if (p >= end) {
+            break;
         }
 
-        PyObject *converted = NULL;
-        char *value_str = NULL;
-        if (unicode_to_utf8_copy(value, &value_str) < 0) {
-            /* Abort on conversion failure to propagate the exception */
+        /* Find key */
+        const char *key_start = p;
+        while (p < end && *p != '=' && *p != ',') {
+            p++;
+        }
+        const char *key_end = p;
+
+        /* Create normalized key directly from buffer */
+        PyObject *py_key = create_normalized_key(key_start, key_end - key_start);
+        if (py_key == NULL) {
             Py_DECREF(attrs);
-            Py_DECREF(raw_attrs);
             return NULL;
         }
 
-        switch (type) {
-            case ATTR_INT: {
-                converted = PyLong_FromString(value_str, NULL, 10);
-                if (!converted) PyErr_Clear();  /* Fall back to keeping as string */
-                break;
-            }
-            case ATTR_FLOAT: {
-                double v = PyOS_string_to_double(value_str, NULL, NULL);
-                if (v == -1.0 && PyErr_Occurred()) {
-                    PyErr_Clear();
-                    converted = NULL;
-                } else {
-                    converted = PyFloat_FromDouble(v);
+        /* Determine type via schema lookup */
+        AttrType type = ATTR_STRING;
+        if (parsers != NULL) {
+            for (size_t i = 0; i < num_parsers; i++) {
+                if (PyUnicode_CompareWithASCIIString(py_key, parsers[i].name) == 0) {
+                    type = parsers[i].type;
+                    break;
                 }
-                break;
             }
-            case ATTR_BANDWIDTH: {
-                /* bandwidth can be float but should be truncated to int */
-                double v = PyOS_string_to_double(value_str, NULL, NULL);
-                if (v == -1.0 && PyErr_Occurred()) {
-                    PyErr_Clear();
-                    converted = NULL;
-                } else {
-                    converted = PyLong_FromDouble(v);
-                }
-                break;
-            }
-            case ATTR_QUOTED_STRING:
-                /* Remove quotes from quoted values */
-                converted = remove_quotes(value_str);
-                break;
-            case ATTR_STRING:
-            default:
-                Py_INCREF(value);
-                converted = value;
-                break;
         }
-        PyMem_Free(value_str);
 
-        if (converted) {
-            PyDict_SetItem(attrs, key, converted);
-            Py_DECREF(converted);
+        PyObject *py_val = NULL;
+
+        if (p < end && *p == '=') {
+            p++;  /* Skip '=' */
+
+            if (p < end && (*p == '"' || *p == '\'')) {
+                /* Quoted value */
+                char quote = *p++;
+                const char *val_start = p;
+                while (p < end && *p != quote) {
+                    p++;
+                }
+                Py_ssize_t val_len = p - val_start;
+                if (p < end) {
+                    p++;  /* Skip closing quote */
+                }
+
+                /* For quoted values, strip quotes and convert based on type */
+                if (type == ATTR_QUOTED_STRING || type == ATTR_STRING) {
+                    /* Create string without quotes */
+                    py_val = PyUnicode_FromStringAndSize(val_start, val_len);
+                } else if (type == ATTR_INT || type == ATTR_BANDWIDTH) {
+                    /* Numeric inside quotes - parse directly */
+                    char num_buf[64];
+                    if (val_len < (Py_ssize_t)sizeof(num_buf)) {
+                        memcpy(num_buf, val_start, val_len);
+                        num_buf[val_len] = '\0';
+                        if (type == ATTR_BANDWIDTH) {
+                            double v = PyOS_string_to_double(num_buf, NULL, NULL);
+                            if (v == -1.0 && PyErr_Occurred()) {
+                                PyErr_Clear();
+                            } else {
+                                py_val = PyLong_FromDouble(v);
+                            }
+                        } else {
+                            py_val = PyLong_FromString(num_buf, NULL, 10);
+                            if (py_val == NULL) {
+                                PyErr_Clear();
+                            }
+                        }
+                    }
+                    /* Fallback to string if conversion fails */
+                    if (py_val == NULL) {
+                        py_val = PyUnicode_FromStringAndSize(val_start, val_len);
+                    }
+                } else if (type == ATTR_FLOAT) {
+                    char num_buf[64];
+                    if (val_len < (Py_ssize_t)sizeof(num_buf)) {
+                        memcpy(num_buf, val_start, val_len);
+                        num_buf[val_len] = '\0';
+                        double v = PyOS_string_to_double(num_buf, NULL, NULL);
+                        if (v == -1.0 && PyErr_Occurred()) {
+                            PyErr_Clear();
+                            py_val = PyUnicode_FromStringAndSize(val_start, val_len);
+                        } else {
+                            py_val = PyFloat_FromDouble(v);
+                        }
+                    } else {
+                        py_val = PyUnicode_FromStringAndSize(val_start, val_len);
+                    }
+                } else {
+                    py_val = PyUnicode_FromStringAndSize(val_start, val_len);
+                }
+            } else {
+                /* Unquoted value */
+                const char *val_start = p;
+                while (p < end && *p != ',') {
+                    p++;
+                }
+                /* Strip trailing whitespace */
+                const char *val_end = p;
+                while (val_end > val_start && isspace((unsigned char)*(val_end - 1))) {
+                    val_end--;
+                }
+                Py_ssize_t val_len = val_end - val_start;
+
+                /* Direct type conversion - no intermediate Python string! */
+                if (type == ATTR_INT) {
+                    char num_buf[64];
+                    if (val_len < (Py_ssize_t)sizeof(num_buf)) {
+                        memcpy(num_buf, val_start, val_len);
+                        num_buf[val_len] = '\0';
+                        py_val = PyLong_FromString(num_buf, NULL, 10);
+                        if (py_val == NULL) {
+                            PyErr_Clear();
+                        }
+                    }
+                    if (py_val == NULL) {
+                        py_val = PyUnicode_FromStringAndSize(val_start, val_len);
+                    }
+                } else if (type == ATTR_BANDWIDTH) {
+                    char num_buf[64];
+                    if (val_len < (Py_ssize_t)sizeof(num_buf)) {
+                        memcpy(num_buf, val_start, val_len);
+                        num_buf[val_len] = '\0';
+                        double v = PyOS_string_to_double(num_buf, NULL, NULL);
+                        if (v == -1.0 && PyErr_Occurred()) {
+                            PyErr_Clear();
+                        } else {
+                            py_val = PyLong_FromDouble(v);
+                        }
+                    }
+                    if (py_val == NULL) {
+                        py_val = PyUnicode_FromStringAndSize(val_start, val_len);
+                    }
+                } else if (type == ATTR_FLOAT) {
+                    char num_buf[64];
+                    if (val_len < (Py_ssize_t)sizeof(num_buf)) {
+                        memcpy(num_buf, val_start, val_len);
+                        num_buf[val_len] = '\0';
+                        double v = PyOS_string_to_double(num_buf, NULL, NULL);
+                        if (v == -1.0 && PyErr_Occurred()) {
+                            PyErr_Clear();
+                            py_val = PyUnicode_FromStringAndSize(val_start, val_len);
+                        } else {
+                            py_val = PyFloat_FromDouble(v);
+                        }
+                    } else {
+                        py_val = PyUnicode_FromStringAndSize(val_start, val_len);
+                    }
+                } else {
+                    /* ATTR_STRING or ATTR_QUOTED_STRING (unquoted case) */
+                    py_val = PyUnicode_FromStringAndSize(val_start, val_len);
+                }
+            }
+        } else {
+            /* Key without value - store key content as value with empty key */
+            Py_ssize_t key_len = key_end - key_start;
+            while (key_len > 0 && isspace((unsigned char)key_start[key_len - 1])) {
+                key_len--;
+            }
+            py_val = PyUnicode_FromStringAndSize(key_start, key_len);
+            Py_DECREF(py_key);
+            py_key = PyUnicode_FromString("");
+            if (py_key == NULL) {
+                Py_XDECREF(py_val);
+                Py_DECREF(attrs);
+                return NULL;
+            }
+        }
+
+        if (py_val == NULL) {
+            Py_DECREF(py_key);
+            Py_DECREF(attrs);
+            return NULL;
+        }
+
+        if (PyDict_SetItem(attrs, py_key, py_val) < 0) {
+            Py_DECREF(py_key);
+            Py_DECREF(py_val);
+            Py_DECREF(attrs);
+            return NULL;
+        }
+
+        Py_DECREF(py_key);
+        Py_DECREF(py_val);
+    }
+
+    return attrs;
+}
+
+/*
+ * Wrapper for parse_attributes_with_schema that handles prefix skipping.
+ * This maintains backward compatibility with existing callers.
+ */
+static PyObject *parse_typed_attribute_list(const char *line, const char *prefix,
+                                            const AttrParser *parsers, size_t num_parsers) {
+    /* Skip prefix if present */
+    const char *content = line;
+    if (prefix != NULL) {
+        size_t prefix_len = strlen(prefix);
+        if (strncmp(line, prefix, prefix_len) == 0) {
+            content = line + prefix_len;
+            if (*content == ':') {
+                content++;
+            }
+        } else {
+            /* Prefix not found - return empty dict */
+            return PyDict_New();
         }
     }
 
-    Py_DECREF(raw_attrs);
-    return attrs;
+    /* Delegate to schema-aware parser */
+    return parse_attributes_with_schema(content, content + strlen(content),
+                                        parsers, num_parsers);
 }
 
 /* Stream info attribute parsers */
@@ -1863,13 +2072,26 @@ m3u8_parse(PyObject *module, PyObject *args, PyObject *kwargs)
     }
 
     /*
+     * Set up parse context with shadow state.
+     * Shadow state avoids dict lookups for hot flags in the main loop.
+     */
+    ParseContext ctx = {
+        .mod_state = mod_state,
+        .data = data,
+        .state = state,
+        .strict = strict,
+        .lineno = 0,
+        .expect_segment = 0,   /* Matches init_parse_state */
+        .expect_playlist = 0,  /* Matches init_parse_state */
+    };
+
+    /*
      * Zero-copy line parsing: Walk the buffer with pointers.
      * We use a single reusable line buffer for the null-terminated stripped line.
      * This avoids copying the entire content upfront (the strtok_r approach).
      */
     const char *p = content;
     const char *end = content + content_len;
-    int lineno = 0;
 
     /* Reusable line buffer - starts small, grows as needed */
     size_t line_buf_size = 256;
@@ -1881,7 +2103,7 @@ m3u8_parse(PyObject *module, PyObject *args, PyObject *kwargs)
     }
 
     while (p < end) {
-        lineno++;
+        ctx.lineno++;
 
         /* Find end of line using memchr (often hardware-optimized) */
         const char *line_start = p;
@@ -1937,14 +2159,23 @@ m3u8_parse(PyObject *module, PyObject *args, PyObject *kwargs)
 
         /* Call custom tags parser if provided */
         if (stripped[0] == '#' && custom_tags_parser != Py_None && PyCallable_Check(custom_tags_parser)) {
+            /* Sync shadow state to dict before callback (so it sees current state) */
+            if (sync_shadow_to_dict(&ctx) < 0) {
+                PyMem_Free(line_buf);
+                Py_DECREF(data);
+                Py_DECREF(state);
+                return NULL;
+            }
             PyObject *result = PyObject_CallFunction(custom_tags_parser, "siOO",
-                stripped, lineno, data, state);
+                stripped, ctx.lineno, data, state);
             if (!result) {
                 PyMem_Free(line_buf);
                 Py_DECREF(data);
                 Py_DECREF(state);
                 return NULL;
             }
+            /* Sync shadow state from dict (callback may have modified it) */
+            sync_shadow_from_dict(&ctx);
             int truth = PyObject_IsTrue(result);
             Py_DECREF(result);
             if (truth < 0) {
@@ -1954,7 +2185,7 @@ m3u8_parse(PyObject *module, PyObject *args, PyObject *kwargs)
                 return NULL;
             }
             if (truth) {
-                line = strtok_r(NULL, "\n\r", &saveptr);
+                /* p has already been advanced to the next line at the top of the loop */
                 continue;
             }
         }
@@ -2024,12 +2255,13 @@ m3u8_parse(PyObject *module, PyObject *args, PyObject *kwargs)
                 }
             }
             else if (strcmp(tag, EXTINF) == 0) {
-                if (parse_extinf(mod_state, stripped, state, lineno, strict) < 0) {
+                if (parse_extinf(mod_state, stripped, state, ctx.lineno, strict) < 0) {
                     PyMem_Free(line_buf);
                     Py_DECREF(data);
                     Py_DECREF(state);
                     return NULL;
                 }
+                ctx.expect_segment = 1;  /* Shadow state for hot path */
             }
             else if (strcmp(tag, EXT_X_BYTERANGE) == 0) {
                 const char *value = stripped + strlen(EXT_X_BYTERANGE) + 1;
@@ -2043,6 +2275,7 @@ m3u8_parse(PyObject *module, PyObject *args, PyObject *kwargs)
                 PyObject *py_value = PyUnicode_FromString(value);
                 PyDict_SetItemString(segment, "byterange", py_value);
                 Py_DECREF(py_value);
+                ctx.expect_segment = 1;  /* Shadow state for hot path */
                 dict_set_interned(state, mod_state->str_expect_segment, Py_True);
             }
             else if (strcmp(tag, EXT_X_BITRATE) == 0) {
@@ -2063,6 +2296,7 @@ m3u8_parse(PyObject *module, PyObject *args, PyObject *kwargs)
                 }
             }
             else if (strcmp(tag, EXT_X_STREAM_INF) == 0) {
+                ctx.expect_playlist = 1;  /* Shadow state for hot path */
                 dict_set_interned(state, mod_state->str_expect_playlist, Py_True);
                 PyDict_SetItemString(data, "is_variant", Py_True);
                 PyDict_SetItemString(data, "media_sequence", Py_None);
@@ -2359,7 +2593,7 @@ m3u8_parse(PyObject *module, PyObject *args, PyObject *kwargs)
             else {
                 /* Unknown tag */
                 if (strict) {
-                    raise_parse_error(mod_state, lineno, stripped);
+                    raise_parse_error(mod_state, ctx.lineno, stripped);
                     PyMem_Free(line_buf);
                     Py_DECREF(data);
                     Py_DECREF(state);
@@ -2368,26 +2602,25 @@ m3u8_parse(PyObject *module, PyObject *args, PyObject *kwargs)
             }
         } else {
             /* Non-comment line - segment or playlist URI */
-            /* Use interned strings for hot path checks */
-            PyObject *expect_segment = dict_get_interned(state, mod_state->str_expect_segment);
-            PyObject *expect_playlist = dict_get_interned(state, mod_state->str_expect_playlist);
-
-            if (expect_segment == Py_True) {
+            /* Use shadow state for hot path checks (no dict lookups) */
+            if (ctx.expect_segment) {
                 if (parse_ts_chunk(mod_state, stripped, data, state) < 0) {
                     PyMem_Free(line_buf);
                     Py_DECREF(data);
                     Py_DECREF(state);
                     return NULL;
                 }
-            } else if (expect_playlist == Py_True) {
+                ctx.expect_segment = 0;  /* parse_ts_chunk clears this */
+            } else if (ctx.expect_playlist) {
                 if (parse_variant_playlist(stripped, data, state) < 0) {
                     PyMem_Free(line_buf);
                     Py_DECREF(data);
                     Py_DECREF(state);
                     return NULL;
                 }
+                ctx.expect_playlist = 0;  /* parse_variant_playlist clears this */
             } else if (strict) {
-                raise_parse_error(mod_state, lineno, stripped);
+                raise_parse_error(mod_state, ctx.lineno, stripped);
                 PyMem_Free(line_buf);
                 Py_DECREF(data);
                 Py_DECREF(state);
