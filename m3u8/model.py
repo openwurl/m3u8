@@ -5,7 +5,14 @@ import decimal
 import os
 
 from m3u8.mixins import BasePathMixin, GroupedBasePathMixin
-from m3u8.parser import format_date_time, parse
+from m3u8.parser import format_date_time
+
+# Try to import the C extension for faster parsing, fall back to Python
+try:
+    from m3u8._m3u8_parser import parse
+except ImportError:
+    from m3u8.parser import parse
+
 from m3u8.protocol import (
     ext_oatcls_scte35,
     ext_x_asset,
