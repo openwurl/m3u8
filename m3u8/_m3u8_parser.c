@@ -13,6 +13,12 @@
 #include <ctype.h>
 #include <math.h>
 
+/* Cross-platform compatibility for Windows/MSVC */
+#ifdef _WIN32
+#define strdup _strdup
+#define strtok_r strtok_s
+#endif
+
 /* Protocol tag definitions - must match protocol.py */
 #define EXT_M3U "#EXTM3U"
 #define EXT_X_TARGETDURATION "#EXT-X-TARGETDURATION"
@@ -59,6 +65,39 @@
 
 /* Forward declarations */
 static PyObject *ParseError = NULL;
+
+/* Cached datetime objects for performance */
+static PyObject *datetime_cls = NULL;
+static PyObject *timedelta_cls = NULL;
+static PyObject *fromisoformat_meth = NULL;
+
+/* Helper to ensure datetime module is loaded (lazy initialization) */
+static int load_datetime_module(void) {
+    if (datetime_cls && timedelta_cls && fromisoformat_meth) return 0;
+
+    PyObject *datetime_mod = PyImport_ImportModule("datetime");
+    if (!datetime_mod) return -1;
+
+    datetime_cls = PyObject_GetAttrString(datetime_mod, "datetime");
+    timedelta_cls = PyObject_GetAttrString(datetime_mod, "timedelta");
+
+    if (datetime_cls) {
+        fromisoformat_meth = PyObject_GetAttrString(datetime_cls, "fromisoformat");
+    }
+
+    Py_DECREF(datetime_mod);
+
+    if (!datetime_cls || !timedelta_cls || !fromisoformat_meth) {
+        Py_XDECREF(datetime_cls);
+        Py_XDECREF(timedelta_cls);
+        Py_XDECREF(fromisoformat_meth);
+        datetime_cls = NULL;
+        timedelta_cls = NULL;
+        fromisoformat_meth = NULL;
+        return -1;
+    }
+    return 0;
+}
 
 /* Utility: raise ParseError with lineno and line arguments */
 static void raise_parse_error(int lineno, const char *line) {
@@ -193,28 +232,20 @@ static PyObject *build_stripped_splitlines(const char *content) {
 
 /* Utility: dt + timedelta(seconds=secs) */
 static PyObject *datetime_add_seconds(PyObject *dt, double secs) {
-    PyObject *datetime_mod = PyImport_ImportModule("datetime");
-    if (!datetime_mod) return NULL;
-
-    PyObject *timedelta_cls = PyObject_GetAttrString(datetime_mod, "timedelta");
-    Py_DECREF(datetime_mod);
-    if (!timedelta_cls) return NULL;
+    if (load_datetime_module() < 0) return NULL;
 
     PyObject *args = PyTuple_New(0);
-    if (!args) {
-        Py_DECREF(timedelta_cls);
-        return NULL;
-    }
+    if (!args) return NULL;
+
     PyObject *kwargs = Py_BuildValue("{s:d}", "seconds", secs);
     if (!kwargs) {
         Py_DECREF(args);
-        Py_DECREF(timedelta_cls);
         return NULL;
     }
+
     PyObject *delta = PyObject_Call(timedelta_cls, args, kwargs);
     Py_DECREF(kwargs);
     Py_DECREF(args);
-    Py_DECREF(timedelta_cls);
     if (!delta) return NULL;
 
     PyObject *new_dt = PyNumber_Add(dt, delta);
@@ -296,8 +327,23 @@ static PyObject *parse_attribute_list(const char *line, const char *prefix) {
             memcpy(name, name_start, name_len);
             name[name_len] = '\0';
 
-            char normalized_name[256];
-            normalize_attribute(name, normalized_name, sizeof(normalized_name));
+            /* Use dynamic allocation for long attribute names to avoid truncation */
+            char stack_buf[256];
+            char *normalized_name;
+            char *heap_buf = NULL;
+            if (name_len < sizeof(stack_buf)) {
+                normalized_name = stack_buf;
+                normalize_attribute(name, normalized_name, sizeof(stack_buf));
+            } else {
+                heap_buf = malloc(name_len + 1);
+                if (!heap_buf) {
+                    free(name);
+                    Py_DECREF(attrs);
+                    return PyErr_NoMemory();
+                }
+                normalized_name = heap_buf;
+                normalize_attribute(name, normalized_name, name_len + 1);
+            }
             free(name);
 
             p++;  /* Skip '=' */
@@ -315,6 +361,7 @@ static PyObject *parse_attribute_list(const char *line, const char *prefix) {
 
                 char *value = malloc(value_len + 1);
                 if (!value) {
+                    free(heap_buf);
                     Py_DECREF(attrs);
                     return PyErr_NoMemory();
                 }
@@ -324,6 +371,7 @@ static PyObject *parse_attribute_list(const char *line, const char *prefix) {
                 PyObject *py_value = PyUnicode_FromString(value);
                 free(value);
                 if (!py_value) {
+                    free(heap_buf);
                     Py_DECREF(attrs);
                     return NULL;
                 }
@@ -335,6 +383,7 @@ static PyObject *parse_attribute_list(const char *line, const char *prefix) {
                 size_t value_len = p - value_start;
                 char *value = malloc(value_len + 1);
                 if (!value) {
+                    free(heap_buf);
                     Py_DECREF(attrs);
                     return PyErr_NoMemory();
                 }
@@ -344,12 +393,14 @@ static PyObject *parse_attribute_list(const char *line, const char *prefix) {
                 PyObject *py_value = PyUnicode_FromString(value);
                 free(value);
                 if (!py_value) {
+                    free(heap_buf);
                     Py_DECREF(attrs);
                     return NULL;
                 }
                 PyDict_SetItemString(attrs, normalized_name, py_value);
                 Py_DECREF(py_value);
             }
+            free(heap_buf);  /* Safe to call on NULL */
         } else {
             /* Just a value without name */
             size_t value_len = p - name_start;
@@ -426,23 +477,38 @@ static PyObject *parse_typed_attribute_list(const char *line, const char *prefix
 
         PyObject *converted = NULL;
         char *value_str = NULL;
-        if (unicode_to_utf8_copy(value, &value_str) < 0) continue;
+        if (unicode_to_utf8_copy(value, &value_str) < 0) {
+            /* Abort on conversion failure to propagate the exception */
+            Py_DECREF(attrs);
+            Py_DECREF(raw_attrs);
+            return NULL;
+        }
 
         switch (type) {
             case ATTR_INT: {
-                long v = strtol(value_str, NULL, 10);
-                converted = PyLong_FromLong(v);
+                converted = PyLong_FromString(value_str, NULL, 10);
+                if (!converted) PyErr_Clear();  /* Fall back to keeping as string */
                 break;
             }
             case ATTR_FLOAT: {
-                double v = strtod(value_str, NULL);
-                converted = PyFloat_FromDouble(v);
+                double v = PyOS_string_to_double(value_str, NULL, NULL);
+                if (v == -1.0 && PyErr_Occurred()) {
+                    PyErr_Clear();
+                    converted = NULL;
+                } else {
+                    converted = PyFloat_FromDouble(v);
+                }
                 break;
             }
             case ATTR_BANDWIDTH: {
                 /* bandwidth can be float but should be truncated to int */
-                double v = strtod(value_str, NULL);
-                converted = PyLong_FromLong((long)v);
+                double v = PyOS_string_to_double(value_str, NULL, NULL);
+                if (v == -1.0 && PyErr_Occurred()) {
+                    PyErr_Clear();
+                    converted = NULL;
+                } else {
+                    converted = PyLong_FromDouble(v);
+                }
                 break;
             }
             case ATTR_QUOTED_STRING:
@@ -708,14 +774,22 @@ static int parse_extinf(const char *line, PyObject *state, int lineno, int stric
         if (dur_len >= sizeof(duration_str)) dur_len = sizeof(duration_str) - 1;
         memcpy(duration_str, content, dur_len);
         duration_str[dur_len] = '\0';
-        duration = strtod(duration_str, NULL);
+        duration = PyOS_string_to_double(duration_str, NULL, NULL);
+        if (duration == -1.0 && PyErr_Occurred()) {
+            PyErr_Clear();
+            duration = 0.0;
+        }
         title = comma + 1;
     } else {
         if (strict) {
             raise_parse_error(lineno, line);
             return -1;
         }
-        duration = strtod(content, NULL);
+        duration = PyOS_string_to_double(content, NULL, NULL);
+        if (duration == -1.0 && PyErr_Occurred()) {
+            PyErr_Clear();
+            duration = 0.0;
+        }
     }
 
     /* Get or create segment dict in state */
@@ -815,6 +889,8 @@ static int parse_ts_chunk(const char *line, PyObject *data, PyObject *state) {
                 if (del_item_string_ignore_keyerror(state, scte_keys[i]) < 0) return -1;
             }
         } else {
+            /* Clear any potential error from PyDict_GetItemString (though unlikely) */
+            PyErr_Clear();
             PyDict_SetItemString(segment, seg_keys[i], Py_None);
         }
     }
@@ -935,23 +1011,10 @@ static int parse_program_date_time(const char *line, PyObject *data, PyObject *s
     if (!value) return 0;
     value++;
 
-    /* Import datetime and parse ISO format */
-    PyObject *datetime_mod = PyImport_ImportModule("datetime");
-    if (!datetime_mod) return -1;
+    if (load_datetime_module() < 0) return -1;
 
-    PyObject *datetime_class = PyObject_GetAttrString(datetime_mod, "datetime");
-    Py_DECREF(datetime_mod);
-    if (!datetime_class) return -1;
-
-    PyObject *fromisoformat = PyObject_GetAttrString(datetime_class, "fromisoformat");
-    Py_DECREF(datetime_class);
-    if (!fromisoformat) return -1;
-
-    PyObject *dt = PyObject_CallFunction(fromisoformat, "s", value);
-    Py_DECREF(fromisoformat);
-    if (!dt) {
-        return -1;
-    }
+    PyObject *dt = PyObject_CallFunction(fromisoformat_meth, "s", value);
+    if (!dt) return -1;
 
     /* Set in data if not already set */
     PyObject *existing = PyDict_GetItemString(data, "program_date_time");
@@ -1339,21 +1402,33 @@ static PyObject *m3u8_parse(PyObject *self, PyObject *args, PyObject *kwargs) {
             }
             else if (strcmp(tag, EXT_X_TARGETDURATION) == 0) {
                 const char *value = stripped + strlen(EXT_X_TARGETDURATION) + 1;
-                PyObject *py_value = PyLong_FromLong(strtol(value, NULL, 10));
-                PyDict_SetItemString(data, "targetduration", py_value);
-                Py_DECREF(py_value);
+                PyObject *py_value = PyLong_FromString(value, NULL, 10);
+                if (py_value) {
+                    PyDict_SetItemString(data, "targetduration", py_value);
+                    Py_DECREF(py_value);
+                } else {
+                    PyErr_Clear();
+                }
             }
             else if (strcmp(tag, EXT_X_MEDIA_SEQUENCE) == 0) {
                 const char *value = stripped + strlen(EXT_X_MEDIA_SEQUENCE) + 1;
-                PyObject *py_value = PyLong_FromLong(strtol(value, NULL, 10));
-                PyDict_SetItemString(data, "media_sequence", py_value);
-                Py_DECREF(py_value);
+                PyObject *py_value = PyLong_FromString(value, NULL, 10);
+                if (py_value) {
+                    PyDict_SetItemString(data, "media_sequence", py_value);
+                    Py_DECREF(py_value);
+                } else {
+                    PyErr_Clear();
+                }
             }
             else if (strcmp(tag, EXT_X_DISCONTINUITY_SEQUENCE) == 0) {
                 const char *value = stripped + strlen(EXT_X_DISCONTINUITY_SEQUENCE) + 1;
-                PyObject *py_value = PyLong_FromLong(strtol(value, NULL, 10));
-                PyDict_SetItemString(data, "discontinuity_sequence", py_value);
-                Py_DECREF(py_value);
+                PyObject *py_value = PyLong_FromString(value, NULL, 10);
+                if (py_value) {
+                    PyDict_SetItemString(data, "discontinuity_sequence", py_value);
+                    Py_DECREF(py_value);
+                } else {
+                    PyErr_Clear();
+                }
             }
             else if (strcmp(tag, EXT_X_PROGRAM_DATE_TIME) == 0) {
                 if (parse_program_date_time(stripped, data, state) < 0) {
@@ -1402,9 +1477,13 @@ static PyObject *m3u8_parse(PyObject *self, PyObject *args, PyObject *kwargs) {
                     Py_DECREF(segment);
                     segment = PyDict_GetItemString(state, "segment");
                 }
-                PyObject *py_value = PyLong_FromLong(strtol(value, NULL, 10));
-                PyDict_SetItemString(segment, "bitrate", py_value);
-                Py_DECREF(py_value);
+                PyObject *py_value = PyLong_FromString(value, NULL, 10);
+                if (py_value) {
+                    PyDict_SetItemString(segment, "bitrate", py_value);
+                    Py_DECREF(py_value);
+                } else {
+                    PyErr_Clear();
+                }
             }
             else if (strcmp(tag, EXT_X_STREAM_INF) == 0) {
                 PyDict_SetItemString(state, "expect_playlist", Py_True);
@@ -1478,9 +1557,13 @@ static PyObject *m3u8_parse(PyObject *self, PyObject *args, PyObject *kwargs) {
             }
             else if (strcmp(tag, EXT_X_VERSION) == 0) {
                 const char *value = stripped + strlen(EXT_X_VERSION) + 1;
-                PyObject *py_value = PyLong_FromLong(strtol(value, NULL, 10));
-                PyDict_SetItemString(data, "version", py_value);
-                Py_DECREF(py_value);
+                PyObject *py_value = PyLong_FromString(value, NULL, 10);
+                if (py_value) {
+                    PyDict_SetItemString(data, "version", py_value);
+                    Py_DECREF(py_value);
+                } else {
+                    PyErr_Clear();
+                }
             }
             else if (strcmp(tag, EXT_X_ALLOW_CACHE) == 0) {
                 const char *value = stripped + strlen(EXT_X_ALLOW_CACHE) + 1;
@@ -1656,25 +1739,8 @@ static PyObject *m3u8_parse(PyObject *self, PyObject *args, PyObject *kwargs) {
                 PyObject *daterange = parse_typed_attribute_list(stripped, EXT_X_DATERANGE,
                     daterange_parsers, NUM_DATERANGE_PARSERS);
                 if (daterange) {
-                    /* Add any x_ attributes that weren't parsed */
-                    PyObject *raw_attrs = parse_attribute_list(stripped, EXT_X_DATERANGE);
-                    if (raw_attrs) {
-                        PyObject *k, *v;
-                        Py_ssize_t pos = 0;
-                        while (PyDict_Next(raw_attrs, &pos, &k, &v)) {
-                            char *key_str = NULL;
-                            if (unicode_to_utf8_copy(k, &key_str) == 0) {
-                                int is_x = strncmp(key_str, "x_", 2) == 0;
-                                PyMem_Free(key_str);
-                                if (!is_x) continue;
-                                if (!PyDict_GetItem(daterange, k)) {
-                                    PyDict_SetItem(daterange, k, v);
-                                }
-                            }
-                        }
-                        Py_DECREF(raw_attrs);
-                    }
-
+                    /* Note: x_ attributes are already captured by parse_typed_attribute_list
+                       as ATTR_STRING (the default case for unknown attributes) */
                     PyObject *dateranges = PyDict_GetItemString(state, "dateranges");
                     if (!dateranges) {
                         dateranges = PyList_New(0);
