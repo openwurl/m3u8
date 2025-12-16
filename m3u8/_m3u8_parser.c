@@ -41,6 +41,33 @@
 #include <math.h>
 
 /*
+ * Whitespace/Case handling for protocol parsing.
+ *
+ * We intentionally treat playlist syntax as ASCII per RFC 8216. Using the C
+ * locale-dependent ctype tables (isspace/tolower) can cause surprising
+ * behavior changes depending on process locale and input bytes > 0x7F.
+ *
+ * Note: This does not attempt to mirror Python's full Unicode whitespace
+ * semantics for str.strip(); the HLS grammar is ASCII and the input here is
+ * parsed as UTF-8 bytes.
+ */
+static inline int
+ascii_isspace(unsigned char c)
+{
+    return c == ' '  || c == '\t' || c == '\n' ||
+           c == '\r' || c == '\f' || c == '\v';
+}
+
+static inline unsigned char
+ascii_tolower(unsigned char c)
+{
+    if (c >= 'A' && c <= 'Z') {
+        return (unsigned char)(c + ('a' - 'A'));
+    }
+    return c;
+}
+
+/*
  * Compatibility shims for Py_NewRef/Py_XNewRef (added in Python 3.10).
  * These make reference ownership more explicit at call sites.
  */
@@ -151,6 +178,30 @@ typedef struct {
     PyObject *str_keys;
     PyObject *str_cue_out;
     PyObject *str_cue_in;
+    /* Segment/state keys used in hot paths */
+    PyObject *str_program_date_time;
+    PyObject *str_current_program_date_time;
+    PyObject *str_cue_out_start;
+    PyObject *str_cue_out_explicitly_duration;
+    PyObject *str_current_cue_out_scte35;
+    PyObject *str_current_cue_out_oatcls_scte35;
+    PyObject *str_current_cue_out_duration;
+    PyObject *str_current_cue_out_elapsedtime;
+    PyObject *str_scte35;
+    PyObject *str_oatcls_scte35;
+    PyObject *str_scte35_duration;
+    PyObject *str_scte35_elapsedtime;
+    PyObject *str_asset_metadata;
+    PyObject *str_discontinuity;
+    PyObject *str_key;
+    PyObject *str_current_segment_map;
+    PyObject *str_init_section;
+    PyObject *str_dateranges;
+    PyObject *str_gap;
+    PyObject *str_gap_tag;
+    PyObject *str_blackout;
+    PyObject *str_byterange;
+    PyObject *str_bitrate;
 } m3u8_state;
 
 /*
@@ -286,6 +337,29 @@ init_interned_strings(m3u8_state *state)
     INTERN_STRING(str_keys, "keys");
     INTERN_STRING(str_cue_out, "cue_out");
     INTERN_STRING(str_cue_in, "cue_in");
+    INTERN_STRING(str_program_date_time, "program_date_time");
+    INTERN_STRING(str_current_program_date_time, "current_program_date_time");
+    INTERN_STRING(str_cue_out_start, "cue_out_start");
+    INTERN_STRING(str_cue_out_explicitly_duration, "cue_out_explicitly_duration");
+    INTERN_STRING(str_current_cue_out_scte35, "current_cue_out_scte35");
+    INTERN_STRING(str_current_cue_out_oatcls_scte35, "current_cue_out_oatcls_scte35");
+    INTERN_STRING(str_current_cue_out_duration, "current_cue_out_duration");
+    INTERN_STRING(str_current_cue_out_elapsedtime, "current_cue_out_elapsedtime");
+    INTERN_STRING(str_scte35, "scte35");
+    INTERN_STRING(str_oatcls_scte35, "oatcls_scte35");
+    INTERN_STRING(str_scte35_duration, "scte35_duration");
+    INTERN_STRING(str_scte35_elapsedtime, "scte35_elapsedtime");
+    INTERN_STRING(str_asset_metadata, "asset_metadata");
+    INTERN_STRING(str_discontinuity, "discontinuity");
+    INTERN_STRING(str_key, "key");
+    INTERN_STRING(str_current_segment_map, "current_segment_map");
+    INTERN_STRING(str_init_section, "init_section");
+    INTERN_STRING(str_dateranges, "dateranges");
+    INTERN_STRING(str_gap, "gap");
+    INTERN_STRING(str_gap_tag, "gap_tag");
+    INTERN_STRING(str_blackout, "blackout");
+    INTERN_STRING(str_byterange, "byterange");
+    INTERN_STRING(str_bitrate, "bitrate");
 
     #undef INTERN_STRING
     return 0;
@@ -329,37 +403,44 @@ raise_parse_error(m3u8_state *state, int lineno, const char *line)
     }
 }
 
-/* Utility: return a newly allocated UTF-8 encoded copy of a Python unicode object.
-   Caller must PyMem_Free(*out) on success. */
-static int unicode_to_utf8_copy(PyObject *obj, char **out) {
-    *out = NULL;
-    if (!PyUnicode_Check(obj)) {
+/*
+ * remove_quotes(), implemented at the Python level as:
+ *
+ *   quotes = ('"', "'")
+ *   if string.startswith(quotes) and string.endswith(quotes):
+ *       return string[1:-1]
+ *
+ * Note the subtlety: Python does NOT require matching quote characters.
+ * We mirror that behavior for parity.
+ *
+ * Returns: new reference.
+ */
+static PyObject *
+remove_quotes_py(PyObject *str)
+{
+    if (!PyUnicode_Check(str)) {
         PyErr_SetString(PyExc_TypeError, "expected str");
-        return -1;
+        return NULL;
     }
 
-    PyObject *bytes = PyUnicode_AsUTF8String(obj);
-    if (!bytes) return -1;
-
-    char *buf = NULL;
-    Py_ssize_t size = 0;
-    if (PyBytes_AsStringAndSize(bytes, &buf, &size) < 0) {
-        Py_DECREF(bytes);
-        return -1;
+    Py_ssize_t len = PyUnicode_GetLength(str);
+    if (len < 2) {
+        return Py_NewRef(str);
     }
 
-    char *copy = PyMem_Malloc((size_t)size + 1);
-    if (!copy) {
-        Py_DECREF(bytes);
-        PyErr_NoMemory();
-        return -1;
+    Py_UCS4 first = PyUnicode_ReadChar(str, 0);
+    if (first == (Py_UCS4)-1 && PyErr_Occurred()) {
+        return NULL;
     }
-    memcpy(copy, buf, (size_t)size);
-    copy[size] = '\0';
-    Py_DECREF(bytes);
+    Py_UCS4 last = PyUnicode_ReadChar(str, len - 1);
+    if (last == (Py_UCS4)-1 && PyErr_Occurred()) {
+        return NULL;
+    }
 
-    *out = copy;
-    return 0;
+    if ((first == '"' || first == '\'') && (last == '"' || last == '\'')) {
+        return PyUnicode_Substring(str, 1, len - 1);
+    }
+    return Py_NewRef(str);
 }
 
 /*
@@ -372,13 +453,13 @@ static int unicode_to_utf8_copy(PyObject *obj, char **out) {
  * or point into the middle of the string).
  */
 static char *strip(char *str) {
-    while (isspace((unsigned char)*str)) str++;
+    while (ascii_isspace((unsigned char)*str)) str++;
     if (*str == '\0') return str;
     /* Safety: check length before computing end pointer to avoid UB */
     size_t len = strlen(str);
     if (len == 0) return str;
     char *end = str + len - 1;
-    while (end > str && isspace((unsigned char)*end)) end--;
+    while (end > str && ascii_isspace((unsigned char)*end)) end--;
     *(end + 1) = '\0';
     return str;
 }
@@ -455,8 +536,8 @@ static PyObject *build_stripped_splitlines(const char *content) {
     const unsigned char *p = (const unsigned char *)content;
     const unsigned char *end = p + strlen(content);
 
-    while (p < end && isspace(*p)) p++;
-    while (end > p && isspace(*(end - 1))) end--;
+    while (p < end && ascii_isspace(*p)) p++;
+    while (end > p && ascii_isspace(*(end - 1))) end--;
 
     PyObject *lines = PyList_New(0);
     if (!lines) return NULL;
@@ -660,23 +741,23 @@ create_normalized_key(const char *s, Py_ssize_t len)
     Py_ssize_t out_len = 0;
 
     /* Skip leading whitespace */
-    while (in_idx < len && isspace((unsigned char)s[in_idx])) {
+    while (in_idx < len && ascii_isspace((unsigned char)s[in_idx])) {
         in_idx++;
     }
 
     /* Transform characters */
     for (; in_idx < len; in_idx++) {
-        char c = s[in_idx];
+        unsigned char c = (unsigned char)s[in_idx];
         if (c == '-') {
             c = '_';
         } else {
-            c = tolower((unsigned char)c);
+            c = ascii_tolower(c);
         }
-        buf[out_len++] = c;
+        buf[out_len++] = (char)c;
     }
 
     /* Strip trailing whitespace */
-    while (out_len > 0 && isspace((unsigned char)buf[out_len - 1])) {
+    while (out_len > 0 && ascii_isspace((unsigned char)buf[out_len - 1])) {
         out_len--;
     }
     buf[out_len] = '\0';
@@ -690,15 +771,18 @@ create_normalized_key(const char *s, Py_ssize_t len)
 }
 
 /* Utility: remove quotes from string */
-static PyObject *remove_quotes(const char *str) {
-    size_t len = strlen(str);
-    if (len >= 2) {
-        if ((str[0] == '"' && str[len-1] == '"') ||
-            (str[0] == '\'' && str[len-1] == '\'')) {
-            return PyUnicode_FromStringAndSize(str + 1, len - 2);
-        }
+/* Utility: delete a key from dict by interned key; ignore missing-key KeyError. */
+static int
+del_item_interned_ignore_keyerror(PyObject *dict, PyObject *interned_key)
+{
+    if (PyDict_DelItem(dict, interned_key) == 0) {
+        return 0;
     }
-    return PyUnicode_FromString(str);
+    if (PyErr_ExceptionMatches(PyExc_KeyError)) {
+        PyErr_Clear();
+        return 0;
+    }
+    return -1;
 }
 
 /*
@@ -724,7 +808,7 @@ parse_attribute_list_raw(const char *start, const char *end)
     const char *p = start;
     while (p < end) {
         /* Skip leading whitespace and commas */
-        while (p < end && (isspace((unsigned char)*p) || *p == ',')) {
+        while (p < end && (ascii_isspace((unsigned char)*p) || *p == ',')) {
             p++;
         }
         if (p >= end) {
@@ -771,7 +855,7 @@ parse_attribute_list_raw(const char *start, const char *end)
                 }
                 /* Strip trailing whitespace from unquoted values */
                 const char *val_end = p;
-                while (val_end > val_start && isspace((unsigned char)*(val_end - 1))) {
+                while (val_end > val_start && ascii_isspace((unsigned char)*(val_end - 1))) {
                     val_end--;
                 }
                 py_val = PyUnicode_FromStringAndSize(val_start, val_end - val_start);
@@ -781,7 +865,7 @@ parse_attribute_list_raw(const char *start, const char *end)
             /* This handles formats like "EXT-X-CUE-OUT-CONT:2.436/120" */
             Py_ssize_t key_len = key_end - key_start;
             /* Strip trailing whitespace */
-            while (key_len > 0 && isspace((unsigned char)key_start[key_len - 1])) {
+            while (key_len > 0 && ascii_isspace((unsigned char)key_start[key_len - 1])) {
                 key_len--;
             }
             py_val = PyUnicode_FromStringAndSize(key_start, key_len);
@@ -888,7 +972,7 @@ parse_attributes_with_schema(const char *start, const char *end,
     const char *p = start;
     while (p < end) {
         /* Skip leading whitespace and commas */
-        while (p < end && (isspace((unsigned char)*p) || *p == ',')) {
+        while (p < end && (ascii_isspace((unsigned char)*p) || *p == ',')) {
             p++;
         }
         if (p >= end) {
@@ -1002,7 +1086,7 @@ parse_attributes_with_schema(const char *start, const char *end,
                 }
                 /* Strip trailing whitespace */
                 const char *val_end = p;
-                while (val_end > val_start && isspace((unsigned char)*(val_end - 1))) {
+                while (val_end > val_start && ascii_isspace((unsigned char)*(val_end - 1))) {
                     val_end--;
                 }
                 Py_ssize_t val_len = val_end - val_start;
@@ -1059,7 +1143,7 @@ parse_attributes_with_schema(const char *start, const char *end,
         } else {
             /* Key without value - store key content as value with empty key */
             Py_ssize_t key_len = key_end - key_start;
-            while (key_len > 0 && isspace((unsigned char)key_start[key_len - 1])) {
+            while (key_len > 0 && ascii_isspace((unsigned char)key_start[key_len - 1])) {
                 key_len--;
             }
             py_val = PyUnicode_FromStringAndSize(key_start, key_len);
@@ -1296,7 +1380,9 @@ static const AttrParser cueout_parsers[] = {
 
 
 /* Parse a key tag */
-static int parse_key(const char *line, PyObject *data, PyObject *state) {
+static int
+parse_key(m3u8_state *mod_state, const char *line, PyObject *data, PyObject *state)
+{
     PyObject *raw_attrs = parse_attribute_list(line, EXT_X_KEY);
     if (!raw_attrs) return -1;
 
@@ -1310,33 +1396,41 @@ static int parse_key(const char *line, PyObject *data, PyObject *state) {
     PyObject *k, *v;
     Py_ssize_t pos = 0;
     while (PyDict_Next(raw_attrs, &pos, &k, &v)) {
-        char *value_str = NULL;
-        if (unicode_to_utf8_copy(v, &value_str) < 0) continue;
-        PyObject *unquoted = remove_quotes(value_str);
-        PyMem_Free(value_str);
-        if (unquoted) {
-            PyDict_SetItem(key, k, unquoted);
-            Py_DECREF(unquoted);
+        PyObject *unquoted = remove_quotes_py(v);
+        if (unquoted == NULL) {
+            Py_DECREF(key);
+            Py_DECREF(raw_attrs);
+            return -1;
         }
+        if (PyDict_SetItem(key, k, unquoted) < 0) {
+            Py_DECREF(unquoted);
+            Py_DECREF(key);
+            Py_DECREF(raw_attrs);
+            return -1;
+        }
+        Py_DECREF(unquoted);
     }
     Py_DECREF(raw_attrs);
 
     /* Set current key in state */
-    PyDict_SetItemString(state, "current_key", key);
+    if (dict_set_interned(state, mod_state->str_current_key, key) < 0) {
+        Py_DECREF(key);
+        return -1;
+    }
 
     /* Add to keys list if not already present */
-    PyObject *keys = PyDict_GetItemString(data, "keys");
+    PyObject *keys = dict_get_interned(data, mod_state->str_keys);
     if (keys) {
-        int found = 0;
-        Py_ssize_t n = PyList_Size(keys);
-        for (Py_ssize_t i = 0; i < n; i++) {
-            if (PyObject_RichCompareBool(PyList_GetItem(keys, i), key, Py_EQ) == 1) {
-                found = 1;
-                break;
-            }
+        int found = PySequence_Contains(keys, key);
+        if (found < 0) {
+            Py_DECREF(key);
+            return -1;
         }
-        if (!found) {
-            PyList_Append(keys, key);
+        if (found == 0) {
+            if (PyList_Append(keys, key) < 0) {
+                Py_DECREF(key);
+                return -1;
+            }
         }
     }
 
@@ -1460,18 +1554,27 @@ parse_ts_chunk(m3u8_state *mod_state, const char *line,
     }
     Py_DECREF(uri);
 
-    /* Transfer state values to segment (borrowed references from GetItemString) */
-    PyObject *pdt = PyDict_GetItemString(state, "program_date_time");
+    /* Transfer state values to segment (borrowed references) */
+    PyObject *pdt = dict_get_interned(state, mod_state->str_program_date_time);
     if (pdt != NULL) {
-        PyDict_SetItemString(segment, "program_date_time", pdt);
-        PyDict_DelItemString(state, "program_date_time");
+        if (dict_set_interned(segment, mod_state->str_program_date_time, pdt) < 0) {
+            Py_DECREF(segment);
+            return -1;
+        }
+        if (del_item_interned_ignore_keyerror(state, mod_state->str_program_date_time) < 0) {
+            Py_DECREF(segment);
+            return -1;
+        }
     }
 
-    PyObject *current_pdt = PyDict_GetItemString(state, "current_program_date_time");
+    PyObject *current_pdt = dict_get_interned(state, mod_state->str_current_program_date_time);
     if (current_pdt != NULL) {
-        PyDict_SetItemString(segment, "current_program_date_time", current_pdt);
+        if (dict_set_interned(segment, mod_state->str_current_program_date_time, current_pdt) < 0) {
+            Py_DECREF(segment);
+            return -1;
+        }
         /* Update current_program_date_time by adding duration */
-        PyObject *duration = PyDict_GetItemString(segment, "duration");
+        PyObject *duration = dict_get_interned(segment, mod_state->str_duration);
         if (duration != NULL && current_pdt != NULL) {
             double secs = PyFloat_AsDouble(duration);
             if (PyErr_Occurred()) {
@@ -1483,7 +1586,11 @@ parse_ts_chunk(m3u8_state *mod_state, const char *line,
                 Py_DECREF(segment);
                 return -1;
             }
-            PyDict_SetItemString(state, "current_program_date_time", new_pdt);
+            if (dict_set_interned(state, mod_state->str_current_program_date_time, new_pdt) < 0) {
+                Py_DECREF(new_pdt);
+                Py_DECREF(segment);
+                return -1;
+            }
             Py_DECREF(new_pdt);
         }
     }
@@ -1509,47 +1616,94 @@ parse_ts_chunk(m3u8_state *mod_state, const char *line,
         return -1;
     }
 
-    PyObject *cue_out_start = PyDict_GetItemString(state, "cue_out_start");
-    PyDict_SetItemString(segment, "cue_out_start", cue_out_start ? Py_True : Py_False);
-    if (cue_out_start) PyDict_DelItemString(state, "cue_out_start");
+    PyObject *cue_out_start = dict_get_interned(state, mod_state->str_cue_out_start);
+    if (dict_set_interned(segment, mod_state->str_cue_out_start,
+                          cue_out_start ? Py_True : Py_False) < 0) {
+        Py_DECREF(segment);
+        return -1;
+    }
+    if (cue_out_start && del_item_interned_ignore_keyerror(state, mod_state->str_cue_out_start) < 0) {
+        Py_DECREF(segment);
+        return -1;
+    }
 
-    PyObject *cue_out_explicitly_duration = PyDict_GetItemString(state, "cue_out_explicitly_duration");
-    PyDict_SetItemString(segment, "cue_out_explicitly_duration",
-        cue_out_explicitly_duration ? Py_True : Py_False);
-    if (cue_out_explicitly_duration) PyDict_DelItemString(state, "cue_out_explicitly_duration");
+    PyObject *cue_out_explicitly_duration = dict_get_interned(
+        state, mod_state->str_cue_out_explicitly_duration);
+    if (dict_set_interned(segment, mod_state->str_cue_out_explicitly_duration,
+                          cue_out_explicitly_duration ? Py_True : Py_False) < 0) {
+        Py_DECREF(segment);
+        return -1;
+    }
+    if (cue_out_explicitly_duration &&
+        del_item_interned_ignore_keyerror(state, mod_state->str_cue_out_explicitly_duration) < 0) {
+        Py_DECREF(segment);
+        return -1;
+    }
 
     /* SCTE35 values - get if cue_out, pop otherwise */
-    const char *scte_keys[] = {"current_cue_out_scte35", "current_cue_out_oatcls_scte35",
-                               "current_cue_out_duration", "current_cue_out_elapsedtime",
-                               "asset_metadata"};
-    const char *seg_keys[] = {"scte35", "oatcls_scte35", "scte35_duration",
-                              "scte35_elapsedtime", "asset_metadata"};
+    PyObject *scte_keys[] = {
+        mod_state->str_current_cue_out_scte35,
+        mod_state->str_current_cue_out_oatcls_scte35,
+        mod_state->str_current_cue_out_duration,
+        mod_state->str_current_cue_out_elapsedtime,
+        mod_state->str_asset_metadata,
+    };
+    PyObject *seg_keys[] = {
+        mod_state->str_scte35,
+        mod_state->str_oatcls_scte35,
+        mod_state->str_scte35_duration,
+        mod_state->str_scte35_elapsedtime,
+        mod_state->str_asset_metadata,
+    };
 
     for (int i = 0; i < 5; i++) {
-        PyObject *val = PyDict_GetItemString(state, scte_keys[i]);
+        PyObject *val = dict_get_interned(state, scte_keys[i]);
         if (val) {
-            PyDict_SetItemString(segment, seg_keys[i], val);
+            if (dict_set_interned(segment, seg_keys[i], val) < 0) {
+                Py_DECREF(segment);
+                return -1;
+            }
             if (!cue_out_truth) {
-                if (del_item_string_ignore_keyerror(state, scte_keys[i]) < 0) return -1;
+                if (del_item_interned_ignore_keyerror(state, scte_keys[i]) < 0) {
+                    Py_DECREF(segment);
+                    return -1;
+                }
             }
         } else {
-            /* Clear any potential error from PyDict_GetItemString (though unlikely) */
+            /* Clear any potential error from GetItem (though unlikely) */
             PyErr_Clear();
-            PyDict_SetItemString(segment, seg_keys[i], Py_None);
+            if (dict_set_interned(segment, seg_keys[i], Py_None) < 0) {
+                Py_DECREF(segment);
+                return -1;
+            }
         }
     }
 
-    if (del_item_string_ignore_keyerror(state, "cue_out") < 0) return -1;
+    if (del_item_interned_ignore_keyerror(state, mod_state->str_cue_out) < 0) {
+        Py_DECREF(segment);
+        return -1;
+    }
 
     /* Discontinuity */
-    PyObject *discontinuity = PyDict_GetItemString(state, "discontinuity");
-    PyDict_SetItemString(segment, "discontinuity", discontinuity ? Py_True : Py_False);
-    if (discontinuity) PyDict_DelItemString(state, "discontinuity");
+    PyObject *discontinuity = dict_get_interned(state, mod_state->str_discontinuity);
+    if (dict_set_interned(segment, mod_state->str_discontinuity,
+                          discontinuity ? Py_True : Py_False) < 0) {
+        Py_DECREF(segment);
+        return -1;
+    }
+    if (discontinuity &&
+        del_item_interned_ignore_keyerror(state, mod_state->str_discontinuity) < 0) {
+        Py_DECREF(segment);
+        return -1;
+    }
 
     /* Key - use interned string for current_key lookup */
     PyObject *current_key = dict_get_interned(state, mod_state->str_current_key);
     if (current_key) {
-        PyDict_SetItemString(segment, "key", current_key);
+        if (dict_set_interned(segment, mod_state->str_key, current_key) < 0) {
+            Py_DECREF(segment);
+            return -1;
+        }
     } else {
         /* For unencrypted segments, ensure None is in keys list */
         PyObject *keys = dict_get_interned(data, mod_state->str_keys);
@@ -1569,37 +1723,67 @@ parse_ts_chunk(m3u8_state *mod_state, const char *line,
     }
 
     /* Init section */
-    PyObject *current_segment_map = PyDict_GetItemString(state, "current_segment_map");
+    PyObject *current_segment_map = dict_get_interned(state, mod_state->str_current_segment_map);
     /* Only set init_section if the map dict is non-empty (matches Python's truthiness check) */
     if (current_segment_map && PyDict_Size(current_segment_map) > 0) {
-        PyDict_SetItemString(segment, "init_section", current_segment_map);
+        if (dict_set_interned(segment, mod_state->str_init_section, current_segment_map) < 0) {
+            Py_DECREF(segment);
+            return -1;
+        }
     }
 
     /* Dateranges */
-    PyObject *dateranges = PyDict_GetItemString(state, "dateranges");
+    PyObject *dateranges = dict_get_interned(state, mod_state->str_dateranges);
     if (dateranges) {
-        PyDict_SetItemString(segment, "dateranges", dateranges);
-        PyDict_DelItemString(state, "dateranges");
+        if (dict_set_interned(segment, mod_state->str_dateranges, dateranges) < 0) {
+            Py_DECREF(segment);
+            return -1;
+        }
+        if (del_item_interned_ignore_keyerror(state, mod_state->str_dateranges) < 0) {
+            Py_DECREF(segment);
+            return -1;
+        }
     } else {
-        PyDict_SetItemString(segment, "dateranges", Py_None);
+        if (dict_set_interned(segment, mod_state->str_dateranges, Py_None) < 0) {
+            Py_DECREF(segment);
+            return -1;
+        }
     }
 
     /* Gap */
-    PyObject *gap = PyDict_GetItemString(state, "gap");
+    PyObject *gap = dict_get_interned(state, mod_state->str_gap);
     if (gap) {
-        PyDict_SetItemString(segment, "gap_tag", Py_True);
-        PyDict_DelItemString(state, "gap");
+        if (dict_set_interned(segment, mod_state->str_gap_tag, Py_True) < 0) {
+            Py_DECREF(segment);
+            return -1;
+        }
+        if (del_item_interned_ignore_keyerror(state, mod_state->str_gap) < 0) {
+            Py_DECREF(segment);
+            return -1;
+        }
     } else {
-        PyDict_SetItemString(segment, "gap_tag", Py_None);
+        if (dict_set_interned(segment, mod_state->str_gap_tag, Py_None) < 0) {
+            Py_DECREF(segment);
+            return -1;
+        }
     }
 
     /* Blackout */
-    PyObject *blackout = PyDict_GetItemString(state, "blackout");
+    PyObject *blackout = dict_get_interned(state, mod_state->str_blackout);
     if (blackout) {
-        PyDict_SetItemString(segment, "blackout", blackout);
-        PyDict_DelItemString(state, "blackout");
+        if (dict_set_interned(segment, mod_state->str_blackout, blackout) < 0) {
+            Py_DECREF(segment);
+            return -1;
+        }
+        if (del_item_interned_ignore_keyerror(state, mod_state->str_blackout) < 0) {
+            Py_DECREF(segment);
+            return -1;
+        }
     } else {
-        PyDict_SetItemString(segment, "blackout", Py_None);
+        if (dict_set_interned(segment, mod_state->str_blackout, Py_None) < 0) {
+            Py_DECREF(segment);
+            return -1;
+        }
     }
 
     /* Add to segments list using interned key */
@@ -1837,29 +2021,29 @@ static int parse_cueout_cont(const char *line, PyObject *state) {
     /* Check for "2.436/120" style progress */
     PyObject *progress = PyDict_GetItemString(cue_info, "");
     if (progress) {
-        char *progress_str = NULL;
-        if (unicode_to_utf8_copy(progress, &progress_str) == 0) {
-            const char *slash = strchr(progress_str, '/');
-            if (slash) {
-                /* Have elapsed/duration */
-                char elapsed_str[64];
-                size_t elapsed_len = slash - progress_str;
-                if (elapsed_len >= sizeof(elapsed_str)) elapsed_len = sizeof(elapsed_str) - 1;
-                memcpy(elapsed_str, progress_str, elapsed_len);
-                elapsed_str[elapsed_len] = '\0';
-
-                PyObject *elapsed = PyUnicode_FromString(elapsed_str);
-                PyDict_SetItemString(state, "current_cue_out_elapsedtime", elapsed);
-                Py_DECREF(elapsed);
-
-                PyObject *duration = PyUnicode_FromString(slash + 1);
-                PyDict_SetItemString(state, "current_cue_out_duration", duration);
-                Py_DECREF(duration);
-            } else {
-                /* Just duration */
-                PyDict_SetItemString(state, "current_cue_out_duration", progress);
+        if (!PyUnicode_Check(progress)) {
+            PyErr_SetString(PyExc_TypeError, "expected str for cue-out progress");
+            Py_DECREF(cue_info);
+            return -1;
+        }
+        Py_ssize_t n = PyUnicode_GetLength(progress);
+        Py_ssize_t slash = PyUnicode_FindChar(progress, '/', 0, n, 1);
+        if (slash >= 0) {
+            PyObject *elapsed = PyUnicode_Substring(progress, 0, slash);
+            PyObject *duration = PyUnicode_Substring(progress, slash + 1, n);
+            if (elapsed == NULL || duration == NULL) {
+                Py_XDECREF(elapsed);
+                Py_XDECREF(duration);
+                Py_DECREF(cue_info);
+                return -1;
             }
-            PyMem_Free(progress_str);
+            PyDict_SetItemString(state, "current_cue_out_elapsedtime", elapsed);
+            PyDict_SetItemString(state, "current_cue_out_duration", duration);
+            Py_DECREF(elapsed);
+            Py_DECREF(duration);
+        } else {
+            /* Just duration */
+            PyDict_SetItemString(state, "current_cue_out_duration", progress);
         }
     }
 
@@ -1920,10 +2104,10 @@ m3u8_parse(PyObject *module, PyObject *args, PyObject *kwargs)
      */
     const char *trimmed = content;
     const char *trimmed_end = content + content_len;
-    while (trimmed < trimmed_end && isspace((unsigned char)*trimmed)) {
+    while (trimmed < trimmed_end && ascii_isspace((unsigned char)*trimmed)) {
         trimmed++;
     }
-    while (trimmed_end > trimmed && isspace((unsigned char)*(trimmed_end - 1))) {
+    while (trimmed_end > trimmed && ascii_isspace((unsigned char)*(trimmed_end - 1))) {
         trimmed_end--;
     }
     Py_ssize_t trimmed_len = (Py_ssize_t)(trimmed_end - trimmed);
@@ -2023,12 +2207,12 @@ m3u8_parse(PyObject *module, PyObject *args, PyObject *kwargs)
         Py_ssize_t line_len = eol - line_start;
 
         /* Strip leading whitespace */
-        while (line_len > 0 && isspace((unsigned char)*line_start)) {
+        while (line_len > 0 && ascii_isspace((unsigned char)*line_start)) {
             line_start++;
             line_len--;
         }
         /* Strip trailing whitespace */
-        while (line_len > 0 && isspace((unsigned char)line_start[line_len - 1])) {
+        while (line_len > 0 && ascii_isspace((unsigned char)line_start[line_len - 1])) {
             line_len--;
         }
 
@@ -2075,8 +2259,27 @@ m3u8_parse(PyObject *module, PyObject *args, PyObject *kwargs)
                 Py_DECREF(state);
                 return NULL;
             }
-            PyObject *result = PyObject_CallFunction(custom_tags_parser, "siOO",
-                stripped, ctx.lineno, data, state);
+            PyObject *py_line = PyUnicode_FromString(stripped);
+            PyObject *py_lineno = PyLong_FromLong(ctx.lineno);
+            if (py_line == NULL || py_lineno == NULL) {
+                Py_XDECREF(py_line);
+                Py_XDECREF(py_lineno);
+                PyMem_Free(line_buf);
+                Py_DECREF(data);
+                Py_DECREF(state);
+                return NULL;
+            }
+            PyObject *call_args = PyTuple_Pack(4, py_line, py_lineno, data, state);
+            Py_DECREF(py_line);
+            Py_DECREF(py_lineno);
+            if (call_args == NULL) {
+                PyMem_Free(line_buf);
+                Py_DECREF(data);
+                Py_DECREF(state);
+                return NULL;
+            }
+            PyObject *result = PyObject_Call(custom_tags_parser, call_args, NULL);
+            Py_DECREF(call_args);
             if (!result) {
                 PyMem_Free(line_buf);
                 Py_DECREF(data);
@@ -2156,7 +2359,7 @@ m3u8_parse(PyObject *module, PyObject *args, PyObject *kwargs)
                 }
             }
             else if (strcmp(tag, EXT_X_KEY) == 0) {
-                if (parse_key(stripped, data, state) < 0) {
+                if (parse_key(mod_state, stripped, data, state) < 0) {
                     PyMem_Free(line_buf);
                     Py_DECREF(data);
                     Py_DECREF(state);
@@ -2182,7 +2385,7 @@ m3u8_parse(PyObject *module, PyObject *args, PyObject *kwargs)
                     return NULL;
                 }
                 PyObject *py_value = PyUnicode_FromString(value);
-                PyDict_SetItemString(segment, "byterange", py_value);
+                dict_set_interned(segment, mod_state->str_byterange, py_value);
                 Py_DECREF(py_value);
                 ctx.expect_segment = 1;  /* Shadow state for hot path */
                 dict_set_interned(state, mod_state->str_expect_segment, Py_True);
@@ -2198,7 +2401,7 @@ m3u8_parse(PyObject *module, PyObject *args, PyObject *kwargs)
                 }
                 PyObject *py_value = PyLong_FromString(value, NULL, 10);
                 if (py_value) {
-                    PyDict_SetItemString(segment, "bitrate", py_value);
+                    dict_set_interned(segment, mod_state->str_bitrate, py_value);
                     Py_DECREF(py_value);
                 } else {
                     PyErr_Clear();
@@ -2429,17 +2632,35 @@ m3u8_parse(PyObject *module, PyObject *args, PyObject *kwargs)
                 PyObject *raw_attrs = parse_attribute_list(stripped, EXT_X_SESSION_KEY);
                 if (raw_attrs) {
                     PyObject *key = PyDict_New();
+                    if (key == NULL) {
+                        Py_DECREF(raw_attrs);
+                        PyMem_Free(line_buf);
+                        Py_DECREF(data);
+                        Py_DECREF(state);
+                        return NULL;
+                    }
                     PyObject *k, *v;
                     Py_ssize_t pos = 0;
                     while (PyDict_Next(raw_attrs, &pos, &k, &v)) {
-                        char *value_str = NULL;
-                        if (unicode_to_utf8_copy(v, &value_str) < 0) continue;
-                        PyObject *unquoted = remove_quotes(value_str);
-                        PyMem_Free(value_str);
-                        if (unquoted) {
-                            PyDict_SetItem(key, k, unquoted);
-                            Py_DECREF(unquoted);
+                        PyObject *unquoted = remove_quotes_py(v);
+                        if (unquoted == NULL) {
+                            Py_DECREF(key);
+                            Py_DECREF(raw_attrs);
+                            PyMem_Free(line_buf);
+                            Py_DECREF(data);
+                            Py_DECREF(state);
+                            return NULL;
                         }
+                        if (PyDict_SetItem(key, k, unquoted) < 0) {
+                            Py_DECREF(unquoted);
+                            Py_DECREF(key);
+                            Py_DECREF(raw_attrs);
+                            PyMem_Free(line_buf);
+                            Py_DECREF(data);
+                            Py_DECREF(state);
+                            return NULL;
+                        }
+                        Py_DECREF(unquoted);
                     }
                     Py_DECREF(raw_attrs);
                     PyObject *session_keys = PyDict_GetItemString(data, "session_keys");
@@ -2615,6 +2836,29 @@ m3u8_parser_traverse(PyObject *module, visitproc visit, void *arg)
     Py_VISIT(state->str_keys);
     Py_VISIT(state->str_cue_out);
     Py_VISIT(state->str_cue_in);
+    Py_VISIT(state->str_program_date_time);
+    Py_VISIT(state->str_current_program_date_time);
+    Py_VISIT(state->str_cue_out_start);
+    Py_VISIT(state->str_cue_out_explicitly_duration);
+    Py_VISIT(state->str_current_cue_out_scte35);
+    Py_VISIT(state->str_current_cue_out_oatcls_scte35);
+    Py_VISIT(state->str_current_cue_out_duration);
+    Py_VISIT(state->str_current_cue_out_elapsedtime);
+    Py_VISIT(state->str_scte35);
+    Py_VISIT(state->str_oatcls_scte35);
+    Py_VISIT(state->str_scte35_duration);
+    Py_VISIT(state->str_scte35_elapsedtime);
+    Py_VISIT(state->str_asset_metadata);
+    Py_VISIT(state->str_discontinuity);
+    Py_VISIT(state->str_key);
+    Py_VISIT(state->str_current_segment_map);
+    Py_VISIT(state->str_init_section);
+    Py_VISIT(state->str_dateranges);
+    Py_VISIT(state->str_gap);
+    Py_VISIT(state->str_gap_tag);
+    Py_VISIT(state->str_blackout);
+    Py_VISIT(state->str_byterange);
+    Py_VISIT(state->str_bitrate);
     return 0;
 }
 
@@ -2642,6 +2886,29 @@ m3u8_parser_clear(PyObject *module)
     Py_CLEAR(state->str_keys);
     Py_CLEAR(state->str_cue_out);
     Py_CLEAR(state->str_cue_in);
+    Py_CLEAR(state->str_program_date_time);
+    Py_CLEAR(state->str_current_program_date_time);
+    Py_CLEAR(state->str_cue_out_start);
+    Py_CLEAR(state->str_cue_out_explicitly_duration);
+    Py_CLEAR(state->str_current_cue_out_scte35);
+    Py_CLEAR(state->str_current_cue_out_oatcls_scte35);
+    Py_CLEAR(state->str_current_cue_out_duration);
+    Py_CLEAR(state->str_current_cue_out_elapsedtime);
+    Py_CLEAR(state->str_scte35);
+    Py_CLEAR(state->str_oatcls_scte35);
+    Py_CLEAR(state->str_scte35_duration);
+    Py_CLEAR(state->str_scte35_elapsedtime);
+    Py_CLEAR(state->str_asset_metadata);
+    Py_CLEAR(state->str_discontinuity);
+    Py_CLEAR(state->str_key);
+    Py_CLEAR(state->str_current_segment_map);
+    Py_CLEAR(state->str_init_section);
+    Py_CLEAR(state->str_dateranges);
+    Py_CLEAR(state->str_gap);
+    Py_CLEAR(state->str_gap_tag);
+    Py_CLEAR(state->str_blackout);
+    Py_CLEAR(state->str_byterange);
+    Py_CLEAR(state->str_bitrate);
     return 0;
 }
 
@@ -2697,6 +2964,29 @@ PyInit__m3u8_parser(void)
     state->str_keys = NULL;
     state->str_cue_out = NULL;
     state->str_cue_in = NULL;
+    state->str_program_date_time = NULL;
+    state->str_current_program_date_time = NULL;
+    state->str_cue_out_start = NULL;
+    state->str_cue_out_explicitly_duration = NULL;
+    state->str_current_cue_out_scte35 = NULL;
+    state->str_current_cue_out_oatcls_scte35 = NULL;
+    state->str_current_cue_out_duration = NULL;
+    state->str_current_cue_out_elapsedtime = NULL;
+    state->str_scte35 = NULL;
+    state->str_oatcls_scte35 = NULL;
+    state->str_scte35_duration = NULL;
+    state->str_scte35_elapsedtime = NULL;
+    state->str_asset_metadata = NULL;
+    state->str_discontinuity = NULL;
+    state->str_key = NULL;
+    state->str_current_segment_map = NULL;
+    state->str_init_section = NULL;
+    state->str_dateranges = NULL;
+    state->str_gap = NULL;
+    state->str_gap_tag = NULL;
+    state->str_blackout = NULL;
+    state->str_byterange = NULL;
+    state->str_bitrate = NULL;
 
     /* Import ParseError from m3u8.parser to use the same exception class */
     PyObject *parser_module = PyImport_ImportModule("m3u8.parser");
