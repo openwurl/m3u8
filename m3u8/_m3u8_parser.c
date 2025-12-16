@@ -69,6 +69,7 @@ ascii_tolower(unsigned char c)
 
 /*
  * Case-insensitive match between a raw buffer and a null-terminated key.
+ * Also treats '-' as '_' to match normalized attribute names.
  * This avoids creating Python objects during schema lookup (hot path optimization).
  */
 static inline int
@@ -76,7 +77,11 @@ buffer_matches_key(const char *buf, size_t len, const char *key)
 {
     for (size_t i = 0; i < len; i++) {
         if (key[i] == '\0') return 0;  /* Key shorter than buffer */
-        if (ascii_tolower((unsigned char)buf[i]) != (unsigned char)key[i]) return 0;
+        unsigned char c = (unsigned char)buf[i];
+        /* Normalize: lowercase and treat '-' as '_' */
+        if (c == '-') c = '_';
+        else c = ascii_tolower(c);
+        if (c != (unsigned char)key[i]) return 0;
     }
     return key[len] == '\0';  /* Ensure exact length match */
 }
@@ -554,16 +559,6 @@ get_or_create_segment(m3u8_state *mod_state, PyObject *state)
     }
     Py_DECREF(segment);
     return dict_get_interned(state, mod_state->str_segment);
-}
-
-/* Utility: set dict[key] = value, taking ownership of a new reference to value */
-static int set_item_string_stealref(PyObject *dict, const char *key, PyObject *value) {
-    if (!value) {
-        return -1;
-    }
-    int rc = PyDict_SetItemString(dict, key, value);
-    Py_DECREF(value);
-    return rc;
 }
 
 /* Utility: build list like Python's content.strip().splitlines() (preserve internal blanks) */
@@ -2275,7 +2270,7 @@ handle_stream_inf(ParseContext *ctx, const char *line)
  */
 static int
 handle_stream_inf_with_uri(ParseContext *ctx, const char *line, const char *tag,
-                           const AttributeParser *parsers, size_t num_parsers,
+                           const AttrParser *parsers, size_t num_parsers,
                            const char *info_key, PyObject *list_key)
 {
     m3u8_state *ms = ctx->mod_state;
