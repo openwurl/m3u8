@@ -24,11 +24,15 @@ if (
     sys.platform in ("darwin", "linux")
     and os.environ.get("M3U8_NO_C_EXTENSION", "") != "1"
 ):
+    # When building wheels (cibuildwheel sets this), require the extension
+    # For local editable installs, keep it optional so pure-Python fallback works
+    is_wheel_build = "CIBUILDWHEEL" in os.environ
+    
     ext_modules.append(
         Extension(
             "m3u8._m3u8_parser",
             sources=["m3u8/_m3u8_parser.c"],
-            optional=True,  # Don't fail the build if extension compilation fails
+            optional=not is_wheel_build,  # Required for wheels, optional otherwise
             py_limited_api=True,
             define_macros=[("Py_LIMITED_API", PY_LIMITED_API)],
         )

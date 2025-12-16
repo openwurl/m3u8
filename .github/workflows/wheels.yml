@@ -21,10 +21,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          # Linux x86_64 and aarch64 (via QEMU) on ubuntu
+          - os: ubuntu-latest
+            archs: "x86_64 aarch64"
+          # macOS x86_64 on Intel runner
+          - os: macos-13
+            archs: "x86_64"
+          # macOS arm64 on Apple Silicon runner  
+          - os: macos-14
+            archs: "arm64"
 
     steps:
       - uses: actions/checkout@v4
+
       - name: Set up QEMU
         if: runner.os == 'Linux'
         uses: docker/setup-qemu-action@v3
@@ -34,7 +44,7 @@ jobs:
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.21.3
         env:
-          CIBW_ARCHS_LINUX: "x86_64 aarch64"
+          CIBW_ARCHS: ${{ matrix.archs }}
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
