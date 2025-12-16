@@ -27,7 +27,7 @@ if (
     # When building wheels (cibuildwheel sets this), require the extension
     # For local editable installs, keep it optional so pure-Python fallback works
     is_wheel_build = "CIBUILDWHEEL" in os.environ
-    
+
     ext_modules.append(
         Extension(
             "m3u8._m3u8_parser",
