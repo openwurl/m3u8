@@ -49,5 +49,6 @@ build = [
     "cp314-*",
 ]
 
+[tool.cibuildwheel.linux]
 manylinux-x86_64-image = "manylinux2014"
 manylinux-aarch64-image = "manylinux2014"
