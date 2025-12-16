@@ -68,6 +68,20 @@ ascii_tolower(unsigned char c)
 }
 
 /*
+ * Case-insensitive match between a raw buffer and a null-terminated key.
+ * This avoids creating Python objects during schema lookup (hot path optimization).
+ */
+static inline int
+buffer_matches_key(const char *buf, size_t len, const char *key)
+{
+    for (size_t i = 0; i < len; i++) {
+        if (key[i] == '\0') return 0;  /* Key shorter than buffer */
+        if (ascii_tolower((unsigned char)buf[i]) != (unsigned char)key[i]) return 0;
+    }
+    return key[len] == '\0';  /* Ensure exact length match */
+}
+
+/*
  * Compatibility shims for Py_NewRef/Py_XNewRef (added in Python 3.10).
  * These make reference ownership more explicit at call sites.
  */
@@ -151,57 +165,99 @@ static inline PyObject *dict_get_interned(PyObject *dict, PyObject *interned_key
 #define EXT_X_BLACKOUT "#EXT-X-BLACKOUT"
 
 /*
+ * X-macro for interned strings.
+ *
+ * This eliminates 4x duplication: struct fields, init, traverse, clear.
+ * Define once, expand everywhere with different operations.
+ *
+ * Format: X(field_name, string_value)
+ */
+#define INTERNED_STRINGS(X) \
+    /* Core parsing keys */ \
+    X(str_segment, "segment") \
+    X(str_segments, "segments") \
+    X(str_duration, "duration") \
+    X(str_uri, "uri") \
+    X(str_title, "title") \
+    X(str_expect_segment, "expect_segment") \
+    X(str_expect_playlist, "expect_playlist") \
+    X(str_current_key, "current_key") \
+    X(str_keys, "keys") \
+    X(str_cue_out, "cue_out") \
+    X(str_cue_in, "cue_in") \
+    /* Segment/state keys */ \
+    X(str_program_date_time, "program_date_time") \
+    X(str_current_program_date_time, "current_program_date_time") \
+    X(str_cue_out_start, "cue_out_start") \
+    X(str_cue_out_explicitly_duration, "cue_out_explicitly_duration") \
+    X(str_current_cue_out_scte35, "current_cue_out_scte35") \
+    X(str_current_cue_out_oatcls_scte35, "current_cue_out_oatcls_scte35") \
+    X(str_current_cue_out_duration, "current_cue_out_duration") \
+    X(str_current_cue_out_elapsedtime, "current_cue_out_elapsedtime") \
+    X(str_scte35, "scte35") \
+    X(str_oatcls_scte35, "oatcls_scte35") \
+    X(str_scte35_duration, "scte35_duration") \
+    X(str_scte35_elapsedtime, "scte35_elapsedtime") \
+    X(str_asset_metadata, "asset_metadata") \
+    X(str_discontinuity, "discontinuity") \
+    X(str_key, "key") \
+    X(str_current_segment_map, "current_segment_map") \
+    X(str_init_section, "init_section") \
+    X(str_dateranges, "dateranges") \
+    X(str_gap, "gap") \
+    X(str_gap_tag, "gap_tag") \
+    X(str_blackout, "blackout") \
+    X(str_byterange, "byterange") \
+    X(str_bitrate, "bitrate") \
+    /* Data dict keys */ \
+    X(str_playlists, "playlists") \
+    X(str_iframe_playlists, "iframe_playlists") \
+    X(str_image_playlists, "image_playlists") \
+    X(str_tiles, "tiles") \
+    X(str_media, "media") \
+    X(str_rendition_reports, "rendition_reports") \
+    X(str_session_data, "session_data") \
+    X(str_session_keys, "session_keys") \
+    X(str_segment_map, "segment_map") \
+    X(str_skip, "skip") \
+    X(str_part_inf, "part_inf") \
+    X(str_is_variant, "is_variant") \
+    X(str_is_endlist, "is_endlist") \
+    X(str_is_i_frames_only, "is_i_frames_only") \
+    X(str_is_independent_segments, "is_independent_segments") \
+    X(str_is_images_only, "is_images_only") \
+    X(str_playlist_type, "playlist_type") \
+    X(str_media_sequence, "media_sequence") \
+    X(str_targetduration, "targetduration") \
+    X(str_discontinuity_sequence, "discontinuity_sequence") \
+    X(str_version, "version") \
+    X(str_allow_cache, "allow_cache") \
+    X(str_start, "start") \
+    X(str_server_control, "server_control") \
+    X(str_preload_hint, "preload_hint") \
+    X(str_content_steering, "content_steering") \
+    X(str_stream_info, "stream_info") \
+    X(str_parts, "parts") \
+    X(str_iframe_stream_info, "iframe_stream_info") \
+    X(str_image_stream_info, "image_stream_info")
+
+/*
  * Module state - holds all per-module data.
  *
  * Using module state instead of static globals ensures:
  * - Proper cleanup when the module is garbage collected
  * - Compatibility with subinterpreters (PEP 573, PEP 3121)
  * - Thread-safe access to cached objects
- *
- * Frequently-used dict keys are cached as interned strings to avoid
- * repeated allocations and enable fast pointer comparisons.
  */
 typedef struct {
     PyObject *ParseError;
     PyObject *datetime_cls;
     PyObject *timedelta_cls;
     PyObject *fromisoformat_meth;
-    /* Interned string keys for common dict operations */
-    PyObject *str_segment;
-    PyObject *str_segments;
-    PyObject *str_duration;
-    PyObject *str_uri;
-    PyObject *str_title;
-    PyObject *str_expect_segment;
-    PyObject *str_expect_playlist;
-    PyObject *str_current_key;
-    PyObject *str_keys;
-    PyObject *str_cue_out;
-    PyObject *str_cue_in;
-    /* Segment/state keys used in hot paths */
-    PyObject *str_program_date_time;
-    PyObject *str_current_program_date_time;
-    PyObject *str_cue_out_start;
-    PyObject *str_cue_out_explicitly_duration;
-    PyObject *str_current_cue_out_scte35;
-    PyObject *str_current_cue_out_oatcls_scte35;
-    PyObject *str_current_cue_out_duration;
-    PyObject *str_current_cue_out_elapsedtime;
-    PyObject *str_scte35;
-    PyObject *str_oatcls_scte35;
-    PyObject *str_scte35_duration;
-    PyObject *str_scte35_elapsedtime;
-    PyObject *str_asset_metadata;
-    PyObject *str_discontinuity;
-    PyObject *str_key;
-    PyObject *str_current_segment_map;
-    PyObject *str_init_section;
-    PyObject *str_dateranges;
-    PyObject *str_gap;
-    PyObject *str_gap_tag;
-    PyObject *str_blackout;
-    PyObject *str_byterange;
-    PyObject *str_bitrate;
+    /* Interned strings - generated from X-macro */
+    #define DECLARE_INTERNED(name, str) PyObject *name;
+    INTERNED_STRINGS(DECLARE_INTERNED)
+    #undef DECLARE_INTERNED
 } m3u8_state;
 
 /*
@@ -229,6 +285,36 @@ typedef struct {
     int expect_segment;      /* Shadow of state["expect_segment"] */
     int expect_playlist;     /* Shadow of state["expect_playlist"] */
 } ParseContext;
+
+/*
+ * Unified tag handler function type.
+ *
+ * All tag handlers receive the same arguments for consistency and to enable
+ * the dispatch table pattern. This mirrors Python's **parse_kwargs approach.
+ *
+ * Args:
+ *     ctx: Parse context (holds mod_state, data, state, strict, lineno)
+ *     line: Null-terminated line content (the full line including tag)
+ *
+ * Returns:
+ *     0 on success, -1 on failure with exception set
+ */
+typedef int (*TagHandler)(ParseContext *ctx, const char *line);
+
+/*
+ * Dispatch table entry for tag-to-handler mapping.
+ *
+ * Using a dispatch table instead of a long if/else chain:
+ * - Matches Python's DISPATCH dict pattern
+ * - More maintainable and readable
+ * - Easier to add/remove tags
+ * - Linear scan is fast for <50 tags (comparable to dict lookup overhead)
+ */
+typedef struct {
+    const char *tag;      /* Tag string, e.g., "#EXTINF" */
+    size_t tag_len;       /* Pre-computed length for fast prefix matching */
+    TagHandler handler;   /* Handler function */
+} TagDispatch;
 
 /*
  * Sync shadow state TO Python dict (before custom_tags_parser or at end).
@@ -312,56 +398,17 @@ init_datetime_cache(m3u8_state *state)
 }
 
 /*
- * Initialize interned string cache for frequently-used dict keys.
- * Interning avoids repeated string allocations and enables fast
- * pointer-based comparisons in dict operations.
+ * Initialize interned string cache using X-macro expansion.
  * Returns 0 on success, -1 on failure with exception set.
  */
 static int
 init_interned_strings(m3u8_state *state)
 {
-    #define INTERN_STRING(field, str) \
-        do { \
-            state->field = PyUnicode_InternFromString(str); \
-            if (state->field == NULL) return -1; \
-        } while (0)
-
-    INTERN_STRING(str_segment, "segment");
-    INTERN_STRING(str_segments, "segments");
-    INTERN_STRING(str_duration, "duration");
-    INTERN_STRING(str_uri, "uri");
-    INTERN_STRING(str_title, "title");
-    INTERN_STRING(str_expect_segment, "expect_segment");
-    INTERN_STRING(str_expect_playlist, "expect_playlist");
-    INTERN_STRING(str_current_key, "current_key");
-    INTERN_STRING(str_keys, "keys");
-    INTERN_STRING(str_cue_out, "cue_out");
-    INTERN_STRING(str_cue_in, "cue_in");
-    INTERN_STRING(str_program_date_time, "program_date_time");
-    INTERN_STRING(str_current_program_date_time, "current_program_date_time");
-    INTERN_STRING(str_cue_out_start, "cue_out_start");
-    INTERN_STRING(str_cue_out_explicitly_duration, "cue_out_explicitly_duration");
-    INTERN_STRING(str_current_cue_out_scte35, "current_cue_out_scte35");
-    INTERN_STRING(str_current_cue_out_oatcls_scte35, "current_cue_out_oatcls_scte35");
-    INTERN_STRING(str_current_cue_out_duration, "current_cue_out_duration");
-    INTERN_STRING(str_current_cue_out_elapsedtime, "current_cue_out_elapsedtime");
-    INTERN_STRING(str_scte35, "scte35");
-    INTERN_STRING(str_oatcls_scte35, "oatcls_scte35");
-    INTERN_STRING(str_scte35_duration, "scte35_duration");
-    INTERN_STRING(str_scte35_elapsedtime, "scte35_elapsedtime");
-    INTERN_STRING(str_asset_metadata, "asset_metadata");
-    INTERN_STRING(str_discontinuity, "discontinuity");
-    INTERN_STRING(str_key, "key");
-    INTERN_STRING(str_current_segment_map, "current_segment_map");
-    INTERN_STRING(str_init_section, "init_section");
-    INTERN_STRING(str_dateranges, "dateranges");
-    INTERN_STRING(str_gap, "gap");
-    INTERN_STRING(str_gap_tag, "gap_tag");
-    INTERN_STRING(str_blackout, "blackout");
-    INTERN_STRING(str_byterange, "byterange");
-    INTERN_STRING(str_bitrate, "bitrate");
-
-    #undef INTERN_STRING
+    #define INIT_INTERNED(name, str) \
+        state->name = PyUnicode_InternFromString(str); \
+        if (state->name == NULL) return -1;
+    INTERNED_STRINGS(INIT_INTERNED)
+    #undef INIT_INTERNED
     return 0;
 }
 
@@ -462,18 +509,6 @@ static char *strip(char *str) {
     while (end > str && ascii_isspace((unsigned char)*end)) end--;
     *(end + 1) = '\0';
     return str;
-}
-
-/* Utility: delete a key from dict; ignore missing-key KeyError, propagate other errors */
-static int del_item_string_ignore_keyerror(PyObject *dict, const char *key) {
-    if (PyDict_DelItemString(dict, key) == 0) {
-        return 0;
-    }
-    if (PyErr_ExceptionMatches(PyExc_KeyError)) {
-        PyErr_Clear();
-        return 0;
-    }
-    return -1;
 }
 
 /*
@@ -585,70 +620,108 @@ static PyObject *build_stripped_splitlines(const char *content) {
 }
 
 /*
+ * Helper to initialize multiple list fields using interned keys.
+ * Returns 0 on success, -1 on failure.
+ */
+static int
+init_list_fields(PyObject *data, PyObject **keys, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        PyObject *list = PyList_New(0);
+        if (list == NULL) {
+            return -1;
+        }
+        if (dict_set_interned(data, keys[i], list) < 0) {
+            Py_DECREF(list);
+            return -1;
+        }
+        Py_DECREF(list);
+    }
+    return 0;
+}
+
+/*
+ * Helper to initialize multiple dict fields using interned keys.
+ * Returns 0 on success, -1 on failure.
+ */
+static int
+init_dict_fields(PyObject *data, PyObject **keys, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        PyObject *dict = PyDict_New();
+        if (dict == NULL) {
+            return -1;
+        }
+        if (dict_set_interned(data, keys[i], dict) < 0) {
+            Py_DECREF(dict);
+            return -1;
+        }
+        Py_DECREF(dict);
+    }
+    return 0;
+}
+
+/*
  * Initialize the result data dictionary with default values.
  *
  * This sets up all the required keys with their initial values,
  * matching the structure created by the Python parser.
  *
+ * Uses interned strings for faster dict operations (pointer comparison
+ * instead of string hashing on each SetItem).
+ *
  * Returns: New reference to data dict on success, NULL on failure.
  */
 static PyObject *
-init_parse_data(void)
+init_parse_data(m3u8_state *ms)
 {
     PyObject *data = PyDict_New();
     if (data == NULL) {
         return NULL;
     }
 
-    /* Set scalar defaults */
-    if (set_item_string_stealref(data, "media_sequence", PyLong_FromLong(0)) < 0) goto fail;
-    if (PyDict_SetItemString(data, "is_variant", Py_False) < 0) goto fail;
-    if (PyDict_SetItemString(data, "is_endlist", Py_False) < 0) goto fail;
-    if (PyDict_SetItemString(data, "is_i_frames_only", Py_False) < 0) goto fail;
-    if (PyDict_SetItemString(data, "is_independent_segments", Py_False) < 0) goto fail;
-    if (PyDict_SetItemString(data, "is_images_only", Py_False) < 0) goto fail;
-    if (PyDict_SetItemString(data, "playlist_type", Py_None) < 0) goto fail;
+    /* Set scalar defaults using interned keys */
+    PyObject *zero = PyLong_FromLong(0);
+    if (zero == NULL) goto fail;
+    if (dict_set_interned(data, ms->str_media_sequence, zero) < 0) {
+        Py_DECREF(zero);
+        goto fail;
+    }
+    Py_DECREF(zero);
 
-    /* Initialize list fields */
-    #define INIT_LIST(name) do { \
-        PyObject *list = PyList_New(0); \
-        if (list == NULL) goto fail; \
-        if (PyDict_SetItemString(data, name, list) < 0) { \
-            Py_DECREF(list); \
-            goto fail; \
-        } \
-        Py_DECREF(list); \
-    } while (0)
+    if (dict_set_interned(data, ms->str_is_variant, Py_False) < 0) goto fail;
+    if (dict_set_interned(data, ms->str_is_endlist, Py_False) < 0) goto fail;
+    if (dict_set_interned(data, ms->str_is_i_frames_only, Py_False) < 0) goto fail;
+    if (dict_set_interned(data, ms->str_is_independent_segments, Py_False) < 0) goto fail;
+    if (dict_set_interned(data, ms->str_is_images_only, Py_False) < 0) goto fail;
+    if (dict_set_interned(data, ms->str_playlist_type, Py_None) < 0) goto fail;
 
-    INIT_LIST("playlists");
-    INIT_LIST("segments");
-    INIT_LIST("iframe_playlists");
-    INIT_LIST("image_playlists");
-    INIT_LIST("tiles");
-    INIT_LIST("media");
-    INIT_LIST("keys");
-    INIT_LIST("rendition_reports");
-    INIT_LIST("session_data");
-    INIT_LIST("session_keys");
-    INIT_LIST("segment_map");
+    /* Initialize list fields using interned keys */
+    PyObject *list_keys[] = {
+        ms->str_playlists,
+        ms->str_segments,
+        ms->str_iframe_playlists,
+        ms->str_image_playlists,
+        ms->str_tiles,
+        ms->str_media,
+        ms->str_keys,
+        ms->str_rendition_reports,
+        ms->str_session_data,
+        ms->str_session_keys,
+        ms->str_segment_map,
+    };
+    if (init_list_fields(data, list_keys, sizeof(list_keys) / sizeof(list_keys[0])) < 0) {
+        goto fail;
+    }
 
-    #undef INIT_LIST
-
-    /* Initialize dict fields */
-    #define INIT_DICT(name) do { \
-        PyObject *dict = PyDict_New(); \
-        if (dict == NULL) goto fail; \
-        if (PyDict_SetItemString(data, name, dict) < 0) { \
-            Py_DECREF(dict); \
-            goto fail; \
-        } \
-        Py_DECREF(dict); \
-    } while (0)
-
-    INIT_DICT("skip");
-    INIT_DICT("part_inf");
-
-    #undef INIT_DICT
+    /* Initialize dict fields using interned keys */
+    PyObject *dict_keys[] = {
+        ms->str_skip,
+        ms->str_part_inf,
+    };
+    if (init_dict_fields(data, dict_keys, sizeof(dict_keys) / sizeof(dict_keys[0])) < 0) {
+        goto fail;
+    }
 
     return data;
 
@@ -783,6 +856,38 @@ del_item_interned_ignore_keyerror(PyObject *dict, PyObject *interned_key)
         return 0;
     }
     return -1;
+}
+
+/*
+ * Helper: Transfer boolean flag from state to segment.
+ *
+ * Sets segment[key] = True if state[key] exists, False otherwise.
+ * Deletes state[key] if it existed.
+ * Returns 0 on success, -1 on failure.
+ */
+static int
+transfer_state_bool(PyObject *state, PyObject *segment, PyObject *key)
+{
+    PyObject *val = PyDict_GetItem(state, key);  /* borrowed ref, no error */
+    if (PyDict_SetItem(segment, key, val ? Py_True : Py_False) < 0) return -1;
+    if (val && del_item_interned_ignore_keyerror(state, key) < 0) return -1;
+    return 0;
+}
+
+/*
+ * Helper: Transfer value from state to segment (or None if missing).
+ *
+ * Sets segment[key] = state[key] if exists, else segment[key] = None.
+ * Deletes state[key] if it existed.
+ * Returns 0 on success, -1 on failure.
+ */
+static int
+transfer_state_value(PyObject *state, PyObject *segment, PyObject *key)
+{
+    PyObject *val = PyDict_GetItem(state, key);  /* borrowed ref */
+    if (PyDict_SetItem(segment, key, val ? val : Py_None) < 0) return -1;
+    if (val && del_item_interned_ignore_keyerror(state, key) < 0) return -1;
+    return 0;
 }
 
 /*
@@ -985,23 +1090,24 @@ parse_attributes_with_schema(const char *start, const char *end,
             p++;
         }
         const char *key_end = p;
+        size_t key_len = key_end - key_start;
 
-        /* Create normalized key directly from buffer */
-        PyObject *py_key = create_normalized_key(key_start, key_end - key_start);
-        if (py_key == NULL) {
-            Py_DECREF(attrs);
-            return NULL;
-        }
-
-        /* Determine type via schema lookup */
+        /* Determine type via schema lookup BEFORE creating Python objects */
         AttrType type = ATTR_STRING;
         if (parsers != NULL) {
             for (size_t i = 0; i < num_parsers; i++) {
-                if (PyUnicode_CompareWithASCIIString(py_key, parsers[i].name) == 0) {
+                if (buffer_matches_key(key_start, key_len, parsers[i].name)) {
                     type = parsers[i].type;
                     break;
                 }
             }
+        }
+
+        /* Create normalized Python key only once, after schema lookup */
+        PyObject *py_key = create_normalized_key(key_start, key_len);
+        if (py_key == NULL) {
+            Py_DECREF(attrs);
+            return NULL;
         }
 
         PyObject *py_val = NULL;
@@ -1379,38 +1485,41 @@ static const AttrParser cueout_parsers[] = {
 #define NUM_CUEOUT_PARSERS (sizeof(cueout_parsers) / sizeof(cueout_parsers[0]))
 
 
-/* Parse a key tag */
-static int
-parse_key(m3u8_state *mod_state, const char *line, PyObject *data, PyObject *state)
+/*
+ * Helper: parse attribute list with quote removal.
+ * Returns new dict with unquoted values, or NULL on error.
+ */
+static PyObject *
+parse_attrs_unquoted(const char *line, const char *tag)
 {
-    PyObject *raw_attrs = parse_attribute_list(line, EXT_X_KEY);
-    if (!raw_attrs) return -1;
+    PyObject *raw_attrs = parse_attribute_list(line, tag);
+    if (!raw_attrs) return NULL;
 
-    PyObject *key = PyDict_New();
-    if (!key) {
-        Py_DECREF(raw_attrs);
-        return -1;
-    }
+    PyObject *result = PyDict_New();
+    if (!result) { Py_DECREF(raw_attrs); return NULL; }
 
-    /* Convert attributes with quote removal */
     PyObject *k, *v;
     Py_ssize_t pos = 0;
     while (PyDict_Next(raw_attrs, &pos, &k, &v)) {
         PyObject *unquoted = remove_quotes_py(v);
-        if (unquoted == NULL) {
-            Py_DECREF(key);
+        if (unquoted == NULL || PyDict_SetItem(result, k, unquoted) < 0) {
+            Py_XDECREF(unquoted);
+            Py_DECREF(result);
             Py_DECREF(raw_attrs);
-            return -1;
-        }
-        if (PyDict_SetItem(key, k, unquoted) < 0) {
-            Py_DECREF(unquoted);
-            Py_DECREF(key);
-            Py_DECREF(raw_attrs);
-            return -1;
+            return NULL;
         }
         Py_DECREF(unquoted);
     }
     Py_DECREF(raw_attrs);
+    return result;
+}
+
+/* Parse a key tag */
+static int
+parse_key(m3u8_state *mod_state, const char *line, PyObject *data, PyObject *state)
+{
+    PyObject *key = parse_attrs_unquoted(line, EXT_X_KEY);
+    if (!key) return -1;
 
     /* Set current key in state */
     if (dict_set_interned(state, mod_state->str_current_key, key) < 0) {
@@ -1595,16 +1704,13 @@ parse_ts_chunk(m3u8_state *mod_state, const char *line,
         }
     }
 
-    /* Boolean flags from state - use interned strings for hot keys */
-    PyObject *cue_in = dict_get_interned(state, mod_state->str_cue_in);
-    if (dict_set_interned(segment, mod_state->str_cue_in, cue_in ? Py_True : Py_False) < 0) {
+    /* Boolean flags from state - use transfer_state_bool helper */
+    if (transfer_state_bool(state, segment, mod_state->str_cue_in) < 0) {
         Py_DECREF(segment);
         return -1;
     }
-    if (cue_in && PyDict_DelItem(state, mod_state->str_cue_in) < 0) {
-        PyErr_Clear();  /* Ignore KeyError */
-    }
 
+    /* cue_out needs special handling: check truthiness and keep state ref */
     PyObject *cue_out = dict_get_interned(state, mod_state->str_cue_out);
     int cue_out_truth = cue_out ? PyObject_IsTrue(cue_out) : 0;
     if (cue_out_truth < 0) {
@@ -1616,26 +1722,8 @@ parse_ts_chunk(m3u8_state *mod_state, const char *line,
         return -1;
     }
 
-    PyObject *cue_out_start = dict_get_interned(state, mod_state->str_cue_out_start);
-    if (dict_set_interned(segment, mod_state->str_cue_out_start,
-                          cue_out_start ? Py_True : Py_False) < 0) {
-        Py_DECREF(segment);
-        return -1;
-    }
-    if (cue_out_start && del_item_interned_ignore_keyerror(state, mod_state->str_cue_out_start) < 0) {
-        Py_DECREF(segment);
-        return -1;
-    }
-
-    PyObject *cue_out_explicitly_duration = dict_get_interned(
-        state, mod_state->str_cue_out_explicitly_duration);
-    if (dict_set_interned(segment, mod_state->str_cue_out_explicitly_duration,
-                          cue_out_explicitly_duration ? Py_True : Py_False) < 0) {
-        Py_DECREF(segment);
-        return -1;
-    }
-    if (cue_out_explicitly_duration &&
-        del_item_interned_ignore_keyerror(state, mod_state->str_cue_out_explicitly_duration) < 0) {
+    if (transfer_state_bool(state, segment, mod_state->str_cue_out_start) < 0 ||
+        transfer_state_bool(state, segment, mod_state->str_cue_out_explicitly_duration) < 0) {
         Py_DECREF(segment);
         return -1;
     }
@@ -1685,14 +1773,7 @@ parse_ts_chunk(m3u8_state *mod_state, const char *line,
     }
 
     /* Discontinuity */
-    PyObject *discontinuity = dict_get_interned(state, mod_state->str_discontinuity);
-    if (dict_set_interned(segment, mod_state->str_discontinuity,
-                          discontinuity ? Py_True : Py_False) < 0) {
-        Py_DECREF(segment);
-        return -1;
-    }
-    if (discontinuity &&
-        del_item_interned_ignore_keyerror(state, mod_state->str_discontinuity) < 0) {
+    if (transfer_state_bool(state, segment, mod_state->str_discontinuity) < 0) {
         Py_DECREF(segment);
         return -1;
     }
@@ -1732,58 +1813,22 @@ parse_ts_chunk(m3u8_state *mod_state, const char *line,
         }
     }
 
-    /* Dateranges */
-    PyObject *dateranges = dict_get_interned(state, mod_state->str_dateranges);
-    if (dateranges) {
-        if (dict_set_interned(segment, mod_state->str_dateranges, dateranges) < 0) {
-            Py_DECREF(segment);
-            return -1;
-        }
-        if (del_item_interned_ignore_keyerror(state, mod_state->str_dateranges) < 0) {
-            Py_DECREF(segment);
-            return -1;
-        }
-    } else {
-        if (dict_set_interned(segment, mod_state->str_dateranges, Py_None) < 0) {
-            Py_DECREF(segment);
-            return -1;
-        }
+    /* Dateranges and Blackout - transfer value or None */
+    if (transfer_state_value(state, segment, mod_state->str_dateranges) < 0 ||
+        transfer_state_value(state, segment, mod_state->str_blackout) < 0) {
+        Py_DECREF(segment);
+        return -1;
     }
 
-    /* Gap */
+    /* Gap - special: read str_gap, write to str_gap_tag as True/None */
     PyObject *gap = dict_get_interned(state, mod_state->str_gap);
-    if (gap) {
-        if (dict_set_interned(segment, mod_state->str_gap_tag, Py_True) < 0) {
-            Py_DECREF(segment);
-            return -1;
-        }
-        if (del_item_interned_ignore_keyerror(state, mod_state->str_gap) < 0) {
-            Py_DECREF(segment);
-            return -1;
-        }
-    } else {
-        if (dict_set_interned(segment, mod_state->str_gap_tag, Py_None) < 0) {
-            Py_DECREF(segment);
-            return -1;
-        }
+    if (dict_set_interned(segment, mod_state->str_gap_tag, gap ? Py_True : Py_None) < 0) {
+        Py_DECREF(segment);
+        return -1;
     }
-
-    /* Blackout */
-    PyObject *blackout = dict_get_interned(state, mod_state->str_blackout);
-    if (blackout) {
-        if (dict_set_interned(segment, mod_state->str_blackout, blackout) < 0) {
-            Py_DECREF(segment);
-            return -1;
-        }
-        if (del_item_interned_ignore_keyerror(state, mod_state->str_blackout) < 0) {
-            Py_DECREF(segment);
-            return -1;
-        }
-    } else {
-        if (dict_set_interned(segment, mod_state->str_blackout, Py_None) < 0) {
-            Py_DECREF(segment);
-            return -1;
-        }
+    if (gap && del_item_interned_ignore_keyerror(state, mod_state->str_gap) < 0) {
+        Py_DECREF(segment);
+        return -1;
     }
 
     /* Add to segments list using interned key */
@@ -1804,15 +1849,17 @@ parse_ts_chunk(m3u8_state *mod_state, const char *line,
     return 0;
 }
 
-/* Parse variant playlist */
-static int parse_variant_playlist(const char *line, PyObject *data, PyObject *state) {
-    PyObject *stream_info = PyDict_GetItemString(state, "stream_info");
+/* Parse variant playlist - uses interned strings throughout */
+static int parse_variant_playlist(m3u8_state *ms, const char *line,
+                                  PyObject *data, PyObject *state) {
+    PyObject *stream_info = dict_get_interned(state, ms->str_stream_info);
     if (!stream_info) {
         stream_info = PyDict_New();
+        if (!stream_info) return -1;
     } else {
         Py_INCREF(stream_info);
     }
-    if (del_item_string_ignore_keyerror(state, "stream_info") < 0) {
+    if (del_item_interned_ignore_keyerror(state, ms->str_stream_info) < 0) {
         Py_DECREF(stream_info);
         return -1;
     }
@@ -1824,141 +1871,174 @@ static int parse_variant_playlist(const char *line, PyObject *data, PyObject *st
     }
 
     PyObject *uri = PyUnicode_FromString(line);
-    PyDict_SetItemString(playlist, "uri", uri);
+    if (!uri) {
+        Py_DECREF(playlist);
+        Py_DECREF(stream_info);
+        return -1;
+    }
+    if (dict_set_interned(playlist, ms->str_uri, uri) < 0) {
+        Py_DECREF(uri);
+        Py_DECREF(playlist);
+        Py_DECREF(stream_info);
+        return -1;
+    }
     Py_DECREF(uri);
 
-    PyDict_SetItemString(playlist, "stream_info", stream_info);
+    if (dict_set_interned(playlist, ms->str_stream_info, stream_info) < 0) {
+        Py_DECREF(playlist);
+        Py_DECREF(stream_info);
+        return -1;
+    }
     Py_DECREF(stream_info);
 
-    PyObject *playlists = PyDict_GetItemString(data, "playlists");
-    if (playlists) {
-        PyList_Append(playlists, playlist);
+    PyObject *playlists = dict_get_interned(data, ms->str_playlists);
+    if (playlists && PyList_Append(playlists, playlist) < 0) {
+        Py_DECREF(playlist);
+        return -1;
     }
     Py_DECREF(playlist);
 
-    PyDict_SetItemString(state, "expect_playlist", Py_False);
-    return 0;
+    return dict_set_interned(state, ms->str_expect_playlist, Py_False);
 }
 
 /*
- * Parse EXT-X-PROGRAM-DATE-TIME tag.
+ * Parse EXT-X-PROGRAM-DATE-TIME tag - uses interned strings.
  * Returns 0 on success, -1 on failure with exception set.
  */
 static int
-parse_program_date_time(m3u8_state *mod_state, const char *line,
+parse_program_date_time(m3u8_state *ms, const char *line,
                         PyObject *data, PyObject *state)
 {
     const char *value = strchr(line, ':');
-    if (value == NULL) {
-        return 0;
-    }
+    if (value == NULL) return 0;
     value++;
 
-    PyObject *dt = PyObject_CallFunction(mod_state->fromisoformat_meth, "s", value);
-    if (dt == NULL) {
+    PyObject *dt = PyObject_CallFunction(ms->fromisoformat_meth, "s", value);
+    if (dt == NULL) return -1;
+
+    /* Set in data if not already set */
+    PyObject *existing = dict_get_interned(data, ms->str_program_date_time);
+    if (existing == NULL || existing == Py_None) {
+        if (dict_set_interned(data, ms->str_program_date_time, dt) < 0) {
+            Py_DECREF(dt);
+            return -1;
+        }
+    }
+
+    if (dict_set_interned(state, ms->str_current_program_date_time, dt) < 0 ||
+        dict_set_interned(state, ms->str_program_date_time, dt) < 0) {
+        Py_DECREF(dt);
         return -1;
     }
-
-    /* Set in data if not already set (borrowed reference from GetItemString) */
-    PyObject *existing = PyDict_GetItemString(data, "program_date_time");
-    if (existing == NULL || existing == Py_None) {
-        PyDict_SetItemString(data, "program_date_time", dt);
-    }
-
-    PyDict_SetItemString(state, "current_program_date_time", dt);
-    PyDict_SetItemString(state, "program_date_time", dt);
     Py_DECREF(dt);
     return 0;
 }
 
 /*
- * Parse EXT-X-PART tag.
+ * Parse EXT-X-PART tag - uses interned strings throughout.
  * Returns 0 on success, -1 on failure with exception set.
  */
 static int
-parse_part(m3u8_state *mod_state, const char *line, PyObject *state)
+parse_part(m3u8_state *ms, const char *line, PyObject *state)
 {
     PyObject *part = parse_typed_attribute_list(line, EXT_X_PART,
                                                  part_parsers, NUM_PART_PARSERS);
-    if (part == NULL) {
-        return -1;
-    }
+    if (part == NULL) return -1;
 
-    /* Add program_date_time if available (borrowed reference) */
-    PyObject *current_pdt = PyDict_GetItemString(state, "current_program_date_time");
+    /* Add program_date_time if available */
+    PyObject *current_pdt = dict_get_interned(state, ms->str_current_program_date_time);
     if (current_pdt != NULL) {
-        PyDict_SetItemString(part, "program_date_time", current_pdt);
+        if (dict_set_interned(part, ms->str_program_date_time, current_pdt) < 0) {
+            Py_DECREF(part);
+            return -1;
+        }
         /* Update current_program_date_time */
-        PyObject *duration = PyDict_GetItemString(part, "duration");
+        PyObject *duration = dict_get_interned(part, ms->str_duration);
         if (duration != NULL) {
             double secs = PyFloat_AsDouble(duration);
             if (PyErr_Occurred()) {
                 Py_DECREF(part);
                 return -1;
             }
-            PyObject *new_pdt = datetime_add_seconds(mod_state, current_pdt, secs);
+            PyObject *new_pdt = datetime_add_seconds(ms, current_pdt, secs);
             if (new_pdt == NULL) {
                 Py_DECREF(part);
                 return -1;
             }
-            PyDict_SetItemString(state, "current_program_date_time", new_pdt);
+            if (dict_set_interned(state, ms->str_current_program_date_time, new_pdt) < 0) {
+                Py_DECREF(new_pdt);
+                Py_DECREF(part);
+                return -1;
+            }
             Py_DECREF(new_pdt);
         }
     }
 
-    /* Add dateranges (borrowed reference) */
-    PyObject *dateranges = PyDict_GetItemString(state, "dateranges");
-    if (dateranges != NULL) {
-        PyDict_SetItemString(part, "dateranges", dateranges);
-        PyDict_DelItemString(state, "dateranges");
-    } else {
-        PyDict_SetItemString(part, "dateranges", Py_None);
+    /* Add dateranges - use transfer_state_value pattern */
+    if (transfer_state_value(state, part, ms->str_dateranges) < 0) {
+        Py_DECREF(part);
+        return -1;
     }
 
-    /* Add gap_tag (borrowed reference) */
-    PyObject *gap = PyDict_GetItemString(state, "gap");
-    if (gap != NULL) {
-        PyDict_SetItemString(part, "gap_tag", Py_True);
-        PyDict_DelItemString(state, "gap");
-    } else {
-        PyDict_SetItemString(part, "gap_tag", Py_None);
+    /* Add gap_tag - read from str_gap, write True/None to str_gap_tag */
+    PyObject *gap = dict_get_interned(state, ms->str_gap);
+    if (dict_set_interned(part, ms->str_gap_tag, gap ? Py_True : Py_None) < 0) {
+        Py_DECREF(part);
+        return -1;
+    }
+    if (gap && del_item_interned_ignore_keyerror(state, ms->str_gap) < 0) {
+        Py_DECREF(part);
+        return -1;
     }
 
-    /* Get or create segment (borrowed reference after SetItemString) */
-    PyObject *segment = PyDict_GetItemString(state, "segment");
+    /* Get or create segment */
+    PyObject *segment = dict_get_interned(state, ms->str_segment);
     if (segment == NULL) {
         segment = PyDict_New();
         if (segment == NULL) {
             Py_DECREF(part);
             return -1;
         }
-        PyDict_SetItemString(state, "segment", segment);
+        if (dict_set_interned(state, ms->str_segment, segment) < 0) {
+            Py_DECREF(segment);
+            Py_DECREF(part);
+            return -1;
+        }
         Py_DECREF(segment);
-        segment = PyDict_GetItemString(state, "segment");
+        segment = dict_get_interned(state, ms->str_segment);
     }
 
-    /* Get or create parts list in segment (borrowed reference after SetItemString) */
-    PyObject *parts = PyDict_GetItemString(segment, "parts");
+    /* Get or create parts list in segment */
+    PyObject *parts = dict_get_interned(segment, ms->str_parts);
     if (parts == NULL) {
         parts = PyList_New(0);
         if (parts == NULL) {
             Py_DECREF(part);
             return -1;
         }
-        PyDict_SetItemString(segment, "parts", parts);
+        if (dict_set_interned(segment, ms->str_parts, parts) < 0) {
+            Py_DECREF(parts);
+            Py_DECREF(part);
+            return -1;
+        }
         Py_DECREF(parts);
-        parts = PyDict_GetItemString(segment, "parts");
+        parts = dict_get_interned(segment, ms->str_parts);
     }
 
-    PyList_Append(parts, part);
+    if (PyList_Append(parts, part) < 0) {
+        Py_DECREF(part);
+        return -1;
+    }
     Py_DECREF(part);
     return 0;
 }
 
-/* Parse cue out */
-static int parse_cueout(const char *line, PyObject *state) {
-    PyDict_SetItemString(state, "cue_out_start", Py_True);
-    PyDict_SetItemString(state, "cue_out", Py_True);
+/* Parse cue out - uses interned strings for state dict */
+static int parse_cueout(m3u8_state *ms, const char *line, PyObject *state) {
+    if (dict_set_interned(state, ms->str_cue_out_start, Py_True) < 0 ||
+        dict_set_interned(state, ms->str_cue_out, Py_True) < 0) {
+        return -1;
+    }
 
     /* Check for DURATION keyword */
     char upper_line[1024];
@@ -1969,7 +2049,9 @@ static int parse_cueout(const char *line, PyObject *state) {
     upper_line[i] = '\0';
 
     if (strstr(upper_line, "DURATION")) {
-        PyDict_SetItemString(state, "cue_out_explicitly_duration", Py_True);
+        if (dict_set_interned(state, ms->str_cue_out_explicitly_duration, Py_True) < 0) {
+            return -1;
+        }
     }
 
     /* Parse attributes if present */
@@ -1982,43 +2064,43 @@ static int parse_cueout(const char *line, PyObject *state) {
         cueout_parsers, NUM_CUEOUT_PARSERS);
     if (!cue_info) return -1;
 
+    /* cue_info uses attr keys like "cue", "duration", "" - not interned */
     PyObject *cue_out_scte35 = PyDict_GetItemString(cue_info, "cue");
-
-    /* Get duration from "duration" key or empty key */
     PyObject *cue_out_duration = PyDict_GetItemString(cue_info, "duration");
     if (!cue_out_duration) {
         cue_out_duration = PyDict_GetItemString(cue_info, "");
     }
 
-    PyObject *current_scte35 = PyDict_GetItemString(state, "current_cue_out_scte35");
+    /* State dict uses interned keys */
     if (cue_out_scte35) {
-        PyDict_SetItemString(state, "current_cue_out_scte35", cue_out_scte35);
-    } else if (!current_scte35) {
-        /* Keep current if no new value */
+        if (dict_set_interned(state, ms->str_current_cue_out_scte35, cue_out_scte35) < 0) {
+            Py_DECREF(cue_info);
+            return -1;
+        }
     }
-
     if (cue_out_duration) {
-        PyDict_SetItemString(state, "current_cue_out_duration", cue_out_duration);
+        if (dict_set_interned(state, ms->str_current_cue_out_duration, cue_out_duration) < 0) {
+            Py_DECREF(cue_info);
+            return -1;
+        }
     }
 
     Py_DECREF(cue_info);
     return 0;
 }
 
-/* Parse cue out cont */
-static int parse_cueout_cont(const char *line, PyObject *state) {
-    PyDict_SetItemString(state, "cue_out", Py_True);
+/* Parse cue out cont - uses interned strings for state dict */
+static int parse_cueout_cont(m3u8_state *ms, const char *line, PyObject *state) {
+    if (dict_set_interned(state, ms->str_cue_out, Py_True) < 0) return -1;
 
     const char *colon = strchr(line, ':');
-    if (!colon || *(colon + 1) == '\0') {
-        return 0;
-    }
+    if (!colon || *(colon + 1) == '\0') return 0;
 
     PyObject *cue_info = parse_typed_attribute_list(line, EXT_X_CUE_OUT_CONT,
         cueout_cont_parsers, NUM_CUEOUT_CONT_PARSERS);
     if (!cue_info) return -1;
 
-    /* Check for "2.436/120" style progress */
+    /* cue_info uses attr keys like "", "duration", etc. - not interned */
     PyObject *progress = PyDict_GetItemString(cue_info, "");
     if (progress) {
         if (!PyUnicode_Check(progress)) {
@@ -2037,33 +2119,536 @@ static int parse_cueout_cont(const char *line, PyObject *state) {
                 Py_DECREF(cue_info);
                 return -1;
             }
-            PyDict_SetItemString(state, "current_cue_out_elapsedtime", elapsed);
-            PyDict_SetItemString(state, "current_cue_out_duration", duration);
+            /* Use interned keys for state dict */
+            int rc1 = dict_set_interned(state, ms->str_current_cue_out_elapsedtime, elapsed);
+            int rc2 = dict_set_interned(state, ms->str_current_cue_out_duration, duration);
             Py_DECREF(elapsed);
             Py_DECREF(duration);
+            if (rc1 < 0 || rc2 < 0) {
+                Py_DECREF(cue_info);
+                return -1;
+            }
         } else {
-            /* Just duration */
-            PyDict_SetItemString(state, "current_cue_out_duration", progress);
+            if (dict_set_interned(state, ms->str_current_cue_out_duration, progress) < 0) {
+                Py_DECREF(cue_info);
+                return -1;
+            }
         }
     }
 
     PyObject *duration = PyDict_GetItemString(cue_info, "duration");
-    if (duration) {
-        PyDict_SetItemString(state, "current_cue_out_duration", duration);
+    if (duration && dict_set_interned(state, ms->str_current_cue_out_duration, duration) < 0) {
+        Py_DECREF(cue_info);
+        return -1;
     }
 
     PyObject *scte35 = PyDict_GetItemString(cue_info, "scte35");
-    if (scte35) {
-        PyDict_SetItemString(state, "current_cue_out_scte35", scte35);
+    if (scte35 && dict_set_interned(state, ms->str_current_cue_out_scte35, scte35) < 0) {
+        Py_DECREF(cue_info);
+        return -1;
     }
 
     PyObject *elapsedtime = PyDict_GetItemString(cue_info, "elapsedtime");
-    if (elapsedtime) {
-        PyDict_SetItemString(state, "current_cue_out_elapsedtime", elapsedtime);
+    if (elapsedtime && dict_set_interned(state, ms->str_current_cue_out_elapsedtime, elapsedtime) < 0) {
+        Py_DECREF(cue_info);
+        return -1;
     }
 
     Py_DECREF(cue_info);
     return 0;
+}
+
+/*
+ * ============================================================================
+ * Dispatch Table Handlers
+ *
+ * These wrapper functions provide a unified signature for the dispatch table.
+ * Each handler receives a ParseContext and the full line, extracts what it
+ * needs, and calls the appropriate parsing logic.
+ * ============================================================================
+ */
+
+/*
+ * Macro-generated integer value handlers.
+ * These handlers parse an integer value after the tag and store it.
+ */
+#define MAKE_INT_HANDLER(name, tag, field) \
+    static int name(ParseContext *ctx, const char *line) { \
+        const char *value = line + sizeof(tag); \
+        PyObject *py_value = PyLong_FromString(value, NULL, 10); \
+        if (py_value == NULL) { PyErr_Clear(); return 0; } \
+        int rc = dict_set_interned(ctx->data, ctx->mod_state->field, py_value); \
+        Py_DECREF(py_value); \
+        return rc < 0 ? -1 : 0; \
+    }
+
+MAKE_INT_HANDLER(handle_targetduration, EXT_X_TARGETDURATION, str_targetduration)
+MAKE_INT_HANDLER(handle_media_sequence, EXT_X_MEDIA_SEQUENCE, str_media_sequence)
+MAKE_INT_HANDLER(handle_discontinuity_sequence, EXT_X_DISCONTINUITY_SEQUENCE, str_discontinuity_sequence)
+
+/*
+ * Macro-generated wrapper handlers that delegate to existing parse functions.
+ */
+#define MAKE_PARSE_WRAPPER(name, fn) \
+    static int name(ParseContext *ctx, const char *line) { \
+        return fn(ctx->mod_state, line, ctx->data, ctx->state); \
+    }
+
+MAKE_PARSE_WRAPPER(handle_program_date_time, parse_program_date_time)
+MAKE_PARSE_WRAPPER(handle_key, parse_key)
+
+#undef MAKE_PARSE_WRAPPER
+
+/* Handler for #EXTINF */
+static int
+handle_extinf(ParseContext *ctx, const char *line)
+{
+    int rc = parse_extinf(ctx->mod_state, line, ctx->state, ctx->lineno, ctx->strict);
+    if (rc == 0) {
+        ctx->expect_segment = 1;
+    }
+    return rc;
+}
+
+/* Handler for #EXT-X-BYTERANGE */
+static int
+handle_byterange(ParseContext *ctx, const char *line)
+{
+    const char *value = line + sizeof(EXT_X_BYTERANGE);
+    PyObject *segment = get_or_create_segment(ctx->mod_state, ctx->state);
+    if (segment == NULL) {
+        return -1;
+    }
+    PyObject *py_value = PyUnicode_FromString(value);
+    if (py_value == NULL) {
+        return -1;
+    }
+    int rc = dict_set_interned(segment, ctx->mod_state->str_byterange, py_value);
+    Py_DECREF(py_value);
+    if (rc < 0) {
+        return -1;
+    }
+    ctx->expect_segment = 1;
+    return dict_set_interned(ctx->state, ctx->mod_state->str_expect_segment, Py_True);
+}
+
+/* Handler for #EXT-X-BITRATE */
+static int
+handle_bitrate(ParseContext *ctx, const char *line)
+{
+    const char *value = line + sizeof(EXT_X_BITRATE);
+    PyObject *segment = get_or_create_segment(ctx->mod_state, ctx->state);
+    if (segment == NULL) {
+        return -1;
+    }
+    PyObject *py_value = PyLong_FromString(value, NULL, 10);
+    if (py_value == NULL) {
+        PyErr_Clear();
+        return 0;
+    }
+    int rc = dict_set_interned(segment, ctx->mod_state->str_bitrate, py_value);
+    Py_DECREF(py_value);
+    return rc < 0 ? -1 : 0;
+}
+
+/* Handler for #EXT-X-STREAM-INF */
+static int
+handle_stream_inf(ParseContext *ctx, const char *line)
+{
+    m3u8_state *ms = ctx->mod_state;
+    /* Use shadow state only - synced to dict before custom parser/end of parse */
+    ctx->expect_playlist = 1;
+    if (dict_set_interned(ctx->data, ms->str_is_variant, Py_True) < 0) return -1;
+    if (dict_set_interned(ctx->data, ms->str_media_sequence, Py_None) < 0) return -1;
+
+    PyObject *stream_info = parse_typed_attribute_list(line, EXT_X_STREAM_INF,
+        stream_inf_parsers, NUM_STREAM_INF_PARSERS);
+    if (stream_info == NULL) return -1;
+    int rc = dict_set_interned(ctx->state, ms->str_stream_info, stream_info);
+    Py_DECREF(stream_info);
+    return rc < 0 ? -1 : 0;
+}
+
+/*
+ * Helper for iframe/image stream handlers - parses attrs, extracts URI,
+ * builds playlist dict, and appends to list. Uses interned str_uri.
+ */
+static int
+handle_stream_inf_with_uri(ParseContext *ctx, const char *line, const char *tag,
+                           const AttributeParser *parsers, size_t num_parsers,
+                           const char *info_key, PyObject *list_key)
+{
+    m3u8_state *ms = ctx->mod_state;
+    PyObject *info = parse_typed_attribute_list(line, tag, parsers, num_parsers);
+    if (info == NULL) return -1;
+
+    /* Use interned string for URI lookup */
+    PyObject *uri = dict_get_interned(info, ms->str_uri);
+    if (uri == NULL) { Py_DECREF(info); return 0; }
+
+    Py_INCREF(uri);
+    if (del_item_interned_ignore_keyerror(info, ms->str_uri) < 0) {
+        Py_DECREF(uri);
+        Py_DECREF(info);
+        return -1;
+    }
+
+    /* info_key passed as char* - Py_BuildValue "s" is fine for rare keys */
+    PyObject *playlist = Py_BuildValue("{s:N,s:N}", "uri", uri, info_key, info);
+    if (playlist == NULL) return -1;
+
+    PyObject *list = dict_get_interned(ctx->data, list_key);
+    int rc = PyList_Append(list, playlist);
+    Py_DECREF(playlist);
+    return rc;
+}
+
+static int handle_i_frame_stream_inf(ParseContext *ctx, const char *line) {
+    return handle_stream_inf_with_uri(ctx, line, EXT_X_I_FRAME_STREAM_INF,
+        iframe_stream_inf_parsers, NUM_IFRAME_STREAM_INF_PARSERS,
+        "iframe_stream_info", ctx->mod_state->str_iframe_playlists);
+}
+
+static int handle_image_stream_inf(ParseContext *ctx, const char *line) {
+    return handle_stream_inf_with_uri(ctx, line, EXT_X_IMAGE_STREAM_INF,
+        image_stream_inf_parsers, NUM_IMAGE_STREAM_INF_PARSERS,
+        "image_stream_info", ctx->mod_state->str_image_playlists);
+}
+
+/*
+ * Macro-generated handlers that parse typed attributes and append to a list.
+ */
+#define MAKE_TYPED_ATTR_LIST_HANDLER(name, tag, parsers, num_parsers, field) \
+    static int name(ParseContext *ctx, const char *line) { \
+        PyObject *result = parse_typed_attribute_list(line, tag, parsers, num_parsers); \
+        if (result == NULL) return -1; \
+        PyObject *list = dict_get_interned(ctx->data, ctx->mod_state->field); \
+        int rc = PyList_Append(list, result); \
+        Py_DECREF(result); \
+        return rc; \
+    }
+
+MAKE_TYPED_ATTR_LIST_HANDLER(handle_media, EXT_X_MEDIA, media_parsers, NUM_MEDIA_PARSERS, str_media)
+
+/* Handler for #EXT-X-PLAYLIST-TYPE */
+static int
+handle_playlist_type(ParseContext *ctx, const char *line)
+{
+    const char *value = line + sizeof(EXT_X_PLAYLIST_TYPE);
+    /* Use create_normalized_key for safe, DRY normalization (tolower + strip) */
+    PyObject *py_value = create_normalized_key(value, strlen(value));
+    if (py_value == NULL) return -1;
+    int rc = dict_set_interned(ctx->data, ctx->mod_state->str_playlist_type, py_value);
+    Py_DECREF(py_value);
+    return rc < 0 ? -1 : 0;
+}
+
+MAKE_INT_HANDLER(handle_version, EXT_X_VERSION, str_version)
+
+#undef MAKE_INT_HANDLER
+
+/* Handler for #EXT-X-ALLOW-CACHE */
+static int
+handle_allow_cache(ParseContext *ctx, const char *line)
+{
+    const char *value = line + sizeof(EXT_X_ALLOW_CACHE);
+    char normalized[64];
+    size_t i;
+    for (i = 0; i < sizeof(normalized) - 1 && value[i]; i++) {
+        normalized[i] = ascii_tolower((unsigned char)value[i]);
+    }
+    normalized[i] = '\0';
+    PyObject *py_value = PyUnicode_FromString(strip(normalized));
+    if (py_value == NULL) {
+        return -1;
+    }
+    int rc = dict_set_interned(ctx->data, ctx->mod_state->str_allow_cache, py_value);
+    Py_DECREF(py_value);
+    return rc < 0 ? -1 : 0;
+}
+
+/*
+ * Macro-generated flag handlers.
+ * These handlers just set a boolean flag in either data or state dict.
+ */
+#define MAKE_DATA_FLAG_HANDLER(name, field) \
+    static int name(ParseContext *ctx, const char *line) { \
+        (void)line; \
+        return dict_set_interned(ctx->data, ctx->mod_state->field, Py_True); \
+    }
+
+#define MAKE_STATE_FLAG_HANDLER(name, field) \
+    static int name(ParseContext *ctx, const char *line) { \
+        (void)line; \
+        return dict_set_interned(ctx->state, ctx->mod_state->field, Py_True); \
+    }
+
+MAKE_DATA_FLAG_HANDLER(handle_i_frames_only, str_is_i_frames_only)
+MAKE_DATA_FLAG_HANDLER(handle_independent_segments, str_is_independent_segments)
+MAKE_DATA_FLAG_HANDLER(handle_endlist, str_is_endlist)
+MAKE_DATA_FLAG_HANDLER(handle_images_only, str_is_images_only)
+MAKE_STATE_FLAG_HANDLER(handle_discontinuity, str_discontinuity)
+MAKE_STATE_FLAG_HANDLER(handle_cue_in, str_cue_in)
+MAKE_STATE_FLAG_HANDLER(handle_cue_span, str_cue_out)
+MAKE_STATE_FLAG_HANDLER(handle_gap, str_gap)
+
+#undef MAKE_DATA_FLAG_HANDLER
+#undef MAKE_STATE_FLAG_HANDLER
+
+/* Wrapper handlers for cue parsing */
+static int handle_cue_out(ParseContext *ctx, const char *line) {
+    return parse_cueout(ctx->mod_state, line, ctx->state);
+}
+static int handle_cue_out_cont(ParseContext *ctx, const char *line) {
+    return parse_cueout_cont(ctx->mod_state, line, ctx->state);
+}
+
+/* Handler for #EXT-OATCLS-SCTE35 - uses interned strings */
+static int
+handle_oatcls_scte35(ParseContext *ctx, const char *line)
+{
+    m3u8_state *ms = ctx->mod_state;
+    const char *value = strchr(line, ':');
+    if (value == NULL) return 0;
+    value++;
+
+    PyObject *py_value = PyUnicode_FromString(value);
+    if (py_value == NULL) return -1;
+
+    if (dict_set_interned(ctx->state, ms->str_current_cue_out_oatcls_scte35, py_value) < 0) {
+        Py_DECREF(py_value);
+        return -1;
+    }
+    PyObject *current = dict_get_interned(ctx->state, ms->str_current_cue_out_scte35);
+    if (current == NULL) {
+        if (dict_set_interned(ctx->state, ms->str_current_cue_out_scte35, py_value) < 0) {
+            Py_DECREF(py_value);
+            return -1;
+        }
+    }
+    Py_DECREF(py_value);
+    return 0;
+}
+
+/* Handler for #EXT-X-ASSET - uses interned strings */
+static int
+handle_asset(ParseContext *ctx, const char *line)
+{
+    PyObject *asset = parse_attribute_list(line, EXT_X_ASSET);
+    if (asset == NULL) return -1;
+    int rc = dict_set_interned(ctx->state, ctx->mod_state->str_asset_metadata, asset);
+    Py_DECREF(asset);
+    return rc < 0 ? -1 : 0;
+}
+
+/* Handler for #EXT-X-MAP */
+static int
+handle_map(ParseContext *ctx, const char *line)
+{
+    m3u8_state *ms = ctx->mod_state;
+    PyObject *map_info = parse_typed_attribute_list(line, EXT_X_MAP,
+        x_map_parsers, NUM_X_MAP_PARSERS);
+    if (map_info == NULL) {
+        return -1;
+    }
+    if (dict_set_interned(ctx->state, ms->str_current_segment_map, map_info) < 0) {
+        Py_DECREF(map_info);
+        return -1;
+    }
+    PyObject *segment_map = dict_get_interned(ctx->data, ms->str_segment_map);
+    int rc = PyList_Append(segment_map, map_info);
+    Py_DECREF(map_info);
+    return rc;
+}
+
+/*
+ * Macro-generated typed attribute handlers.
+ * These parse typed attributes and store the result in ctx->data.
+ */
+#define MAKE_TYPED_ATTR_HANDLER(name, tag, parsers, num_parsers, field) \
+    static int name(ParseContext *ctx, const char *line) { \
+        PyObject *result = parse_typed_attribute_list(line, tag, parsers, num_parsers); \
+        if (result == NULL) return -1; \
+        int rc = dict_set_interned(ctx->data, ctx->mod_state->field, result); \
+        Py_DECREF(result); \
+        return rc < 0 ? -1 : 0; \
+    }
+
+MAKE_TYPED_ATTR_HANDLER(handle_start, EXT_X_START, start_parsers, NUM_START_PARSERS, str_start)
+MAKE_TYPED_ATTR_HANDLER(handle_server_control, EXT_X_SERVER_CONTROL, server_control_parsers, NUM_SERVER_CONTROL_PARSERS, str_server_control)
+MAKE_TYPED_ATTR_HANDLER(handle_part_inf, EXT_X_PART_INF, part_inf_parsers, NUM_PART_INF_PARSERS, str_part_inf)
+
+/* Handler for #EXT-X-PART */
+static int handle_part(ParseContext *ctx, const char *line) {
+    return parse_part(ctx->mod_state, line, ctx->state);
+}
+
+MAKE_TYPED_ATTR_LIST_HANDLER(handle_rendition_report, EXT_X_RENDITION_REPORT, rendition_report_parsers, NUM_RENDITION_REPORT_PARSERS, str_rendition_reports)
+
+MAKE_TYPED_ATTR_HANDLER(handle_skip, EXT_X_SKIP, skip_parsers, NUM_SKIP_PARSERS, str_skip)
+
+MAKE_TYPED_ATTR_LIST_HANDLER(handle_session_data, EXT_X_SESSION_DATA, session_data_parsers, NUM_SESSION_DATA_PARSERS, str_session_data)
+MAKE_TYPED_ATTR_LIST_HANDLER(handle_tiles, EXT_X_TILES, tiles_parsers, NUM_TILES_PARSERS, str_tiles)
+
+#undef MAKE_TYPED_ATTR_LIST_HANDLER
+
+/* Handler for #EXT-X-SESSION-KEY */
+static int handle_session_key(ParseContext *ctx, const char *line) {
+    PyObject *key = parse_attrs_unquoted(line, EXT_X_SESSION_KEY);
+    if (!key) return -1;
+    PyObject *session_keys = dict_get_interned(ctx->data, ctx->mod_state->str_session_keys);
+    int rc = PyList_Append(session_keys, key);
+    Py_DECREF(key);
+    return rc;
+}
+
+MAKE_TYPED_ATTR_HANDLER(handle_preload_hint, EXT_X_PRELOAD_HINT, preload_hint_parsers, NUM_PRELOAD_HINT_PARSERS, str_preload_hint)
+
+/* Handler for #EXT-X-DATERANGE */
+static int
+handle_daterange(ParseContext *ctx, const char *line)
+{
+    PyObject *daterange = parse_typed_attribute_list(line, EXT_X_DATERANGE,
+        daterange_parsers, NUM_DATERANGE_PARSERS);
+    if (daterange == NULL) {
+        return -1;
+    }
+
+    PyObject *dateranges = dict_get_interned(ctx->state, ctx->mod_state->str_dateranges);
+    if (dateranges == NULL) {
+        dateranges = PyList_New(0);
+        if (dateranges == NULL) {
+            Py_DECREF(daterange);
+            return -1;
+        }
+        if (dict_set_interned(ctx->state, ctx->mod_state->str_dateranges, dateranges) < 0) {
+            Py_DECREF(dateranges);
+            Py_DECREF(daterange);
+            return -1;
+        }
+        Py_DECREF(dateranges);
+        dateranges = dict_get_interned(ctx->state, ctx->mod_state->str_dateranges);
+    }
+
+    int rc = PyList_Append(dateranges, daterange);
+    Py_DECREF(daterange);
+    return rc;
+}
+
+MAKE_TYPED_ATTR_HANDLER(handle_content_steering, EXT_X_CONTENT_STEERING, content_steering_parsers, NUM_CONTENT_STEERING_PARSERS, str_content_steering)
+
+#undef MAKE_TYPED_ATTR_HANDLER
+
+/* Handler for #EXT-X-BLACKOUT */
+static int
+handle_blackout(ParseContext *ctx, const char *line)
+{
+    const char *colon = strchr(line, ':');
+    if (colon != NULL && *(colon + 1) != '\0') {
+        PyObject *blackout_data = PyUnicode_FromString(colon + 1);
+        if (blackout_data == NULL) {
+            return -1;
+        }
+        int rc = dict_set_interned(ctx->state, ctx->mod_state->str_blackout, blackout_data);
+        Py_DECREF(blackout_data);
+        return rc < 0 ? -1 : 0;
+    }
+    return dict_set_interned(ctx->state, ctx->mod_state->str_blackout, Py_True);
+}
+
+/*
+ * Tag dispatch table.
+ *
+ * This replaces the massive if/else strcmp chain with a data-driven approach.
+ * Linear scan for ~40 tags is negligible compared to Python object creation.
+ * The table is ordered roughly by frequency for marginally better cache behavior.
+ *
+ * Note: sizeof(TAG)-1 gives strlen at compile time (excluding null terminator).
+ */
+static const TagDispatch TAG_DISPATCH[] = {
+    /* High-frequency tags first */
+    {EXTINF,                      sizeof(EXTINF)-1,                      handle_extinf},
+    {EXT_X_KEY,                   sizeof(EXT_X_KEY)-1,                   handle_key},
+    {EXT_X_BYTERANGE,             sizeof(EXT_X_BYTERANGE)-1,             handle_byterange},
+    {EXT_X_PROGRAM_DATE_TIME,     sizeof(EXT_X_PROGRAM_DATE_TIME)-1,     handle_program_date_time},
+    {EXT_X_DISCONTINUITY,         sizeof(EXT_X_DISCONTINUITY)-1,         handle_discontinuity},
+    {EXT_X_MAP,                   sizeof(EXT_X_MAP)-1,                   handle_map},
+    {EXT_X_PART,                  sizeof(EXT_X_PART)-1,                  handle_part},
+    {EXT_X_BITRATE,               sizeof(EXT_X_BITRATE)-1,               handle_bitrate},
+    {EXT_X_GAP,                   sizeof(EXT_X_GAP)-1,                   handle_gap},
+    {EXT_X_DATERANGE,             sizeof(EXT_X_DATERANGE)-1,             handle_daterange},
+    /* Variant playlist tags */
+    {EXT_X_STREAM_INF,            sizeof(EXT_X_STREAM_INF)-1,            handle_stream_inf},
+    {EXT_X_MEDIA,                 sizeof(EXT_X_MEDIA)-1,                 handle_media},
+    {EXT_X_I_FRAME_STREAM_INF,    sizeof(EXT_X_I_FRAME_STREAM_INF)-1,    handle_i_frame_stream_inf},
+    {EXT_X_IMAGE_STREAM_INF,      sizeof(EXT_X_IMAGE_STREAM_INF)-1,      handle_image_stream_inf},
+    {EXT_X_SESSION_DATA,          sizeof(EXT_X_SESSION_DATA)-1,          handle_session_data},
+    {EXT_X_SESSION_KEY,           sizeof(EXT_X_SESSION_KEY)-1,           handle_session_key},
+    {EXT_X_CONTENT_STEERING,      sizeof(EXT_X_CONTENT_STEERING)-1,      handle_content_steering},
+    /* Playlist metadata tags */
+    {EXT_X_TARGETDURATION,        sizeof(EXT_X_TARGETDURATION)-1,        handle_targetduration},
+    {EXT_X_MEDIA_SEQUENCE,        sizeof(EXT_X_MEDIA_SEQUENCE)-1,        handle_media_sequence},
+    {EXT_X_DISCONTINUITY_SEQUENCE,sizeof(EXT_X_DISCONTINUITY_SEQUENCE)-1,handle_discontinuity_sequence},
+    {EXT_X_PLAYLIST_TYPE,         sizeof(EXT_X_PLAYLIST_TYPE)-1,         handle_playlist_type},
+    {EXT_X_VERSION,               sizeof(EXT_X_VERSION)-1,               handle_version},
+    {EXT_X_ALLOW_CACHE,           sizeof(EXT_X_ALLOW_CACHE)-1,           handle_allow_cache},
+    {EXT_X_ENDLIST,               sizeof(EXT_X_ENDLIST)-1,               handle_endlist},
+    {EXT_I_FRAMES_ONLY,           sizeof(EXT_I_FRAMES_ONLY)-1,           handle_i_frames_only},
+    {EXT_IS_INDEPENDENT_SEGMENTS, sizeof(EXT_IS_INDEPENDENT_SEGMENTS)-1, handle_independent_segments},
+    {EXT_X_IMAGES_ONLY,           sizeof(EXT_X_IMAGES_ONLY)-1,           handle_images_only},
+    /* Low-latency HLS tags */
+    {EXT_X_SERVER_CONTROL,        sizeof(EXT_X_SERVER_CONTROL)-1,        handle_server_control},
+    {EXT_X_PART_INF,              sizeof(EXT_X_PART_INF)-1,              handle_part_inf},
+    {EXT_X_RENDITION_REPORT,      sizeof(EXT_X_RENDITION_REPORT)-1,      handle_rendition_report},
+    {EXT_X_SKIP,                  sizeof(EXT_X_SKIP)-1,                  handle_skip},
+    {EXT_X_PRELOAD_HINT,          sizeof(EXT_X_PRELOAD_HINT)-1,          handle_preload_hint},
+    /* SCTE-35 / Ad insertion tags */
+    {EXT_X_CUE_OUT_CONT,          sizeof(EXT_X_CUE_OUT_CONT)-1,          handle_cue_out_cont},
+    {EXT_X_CUE_OUT,               sizeof(EXT_X_CUE_OUT)-1,               handle_cue_out},
+    {EXT_X_CUE_IN,                sizeof(EXT_X_CUE_IN)-1,                handle_cue_in},
+    {EXT_X_CUE_SPAN,              sizeof(EXT_X_CUE_SPAN)-1,              handle_cue_span},
+    {EXT_OATCLS_SCTE35,           sizeof(EXT_OATCLS_SCTE35)-1,           handle_oatcls_scte35},
+    {EXT_X_ASSET,                 sizeof(EXT_X_ASSET)-1,                 handle_asset},
+    /* Miscellaneous tags */
+    {EXT_X_START,                 sizeof(EXT_X_START)-1,                 handle_start},
+    {EXT_X_TILES,                 sizeof(EXT_X_TILES)-1,                 handle_tiles},
+    {EXT_X_BLACKOUT,              sizeof(EXT_X_BLACKOUT)-1,              handle_blackout},
+    /* Sentinel */
+    {NULL, 0, NULL}
+};
+
+/*
+ * Dispatch a tag to its handler using the dispatch table.
+ *
+ * Returns:
+ *   1 if handler was found and executed successfully
+ *   0 if no handler found (unknown tag)
+ *  -1 if handler found but returned error (exception set)
+ */
+static int
+dispatch_tag(ParseContext *ctx, const char *line, size_t line_len)
+{
+    /* Fast rejection: all M3U8 tags start with '#' */
+    if (line_len < 4 || line[0] != '#') {
+        return 0;
+    }
+
+    for (const TagDispatch *d = TAG_DISPATCH; d->tag != NULL; d++) {
+        /* Skip if line is shorter than tag */
+        if (line_len < d->tag_len) continue;
+
+        if (strncmp(line, d->tag, d->tag_len) == 0) {
+            /* Verify tag boundary: must end with ':' or be complete line */
+            char next = line[d->tag_len];
+            if (next == ':' || next == '\0') {
+                if (d->handler(ctx, line) < 0) {
+                    return -1;
+                }
+                return 1;  /* Handled */
+            }
+        }
+    }
+    return 0;  /* Not found */
 }
 
 /*
@@ -2151,8 +2736,8 @@ m3u8_parse(PyObject *module, PyObject *args, PyObject *kwargs)
         Py_DECREF(errors);
     }
 
-    /* Initialize result data dict */
-    PyObject *data = init_parse_data();
+    /* Initialize result data dict using interned strings */
+    PyObject *data = init_parse_data(mod_state);
     if (data == NULL) {
         return NULL;
     }
@@ -2303,426 +2888,29 @@ m3u8_parse(PyObject *module, PyObject *args, PyObject *kwargs)
         }
 
         if (stripped[0] == '#') {
-            /* Extract tag (up to first ':') */
-            char tag[128];
-            const char *colon = strchr(stripped, ':');
-            size_t tag_len;
-            if (colon) {
-                tag_len = colon - stripped;
-            } else {
-                tag_len = strlen(stripped);
-            }
-            if (tag_len >= sizeof(tag)) tag_len = sizeof(tag) - 1;
-            memcpy(tag, stripped, tag_len);
-            tag[tag_len] = '\0';
+            /*
+             * Tag dispatch using data-driven table lookup.
+             * This replaces ~400 lines of if/else strcmp chain with a clean loop.
+             * See TAG_DISPATCH table for the tag-to-handler mappings.
+             */
 
-            /* Dispatch based on tag */
-            if (strcmp(tag, EXT_M3U) == 0) {
-                /* Ignore */
+            /* Handle #EXTM3U - just ignore it */
+            if (strncmp(stripped, EXT_M3U, sizeof(EXT_M3U)-1) == 0) {
+                continue;
             }
-            else if (strcmp(tag, EXT_X_TARGETDURATION) == 0) {
-                const char *value = stripped + strlen(EXT_X_TARGETDURATION) + 1;
-                PyObject *py_value = PyLong_FromString(value, NULL, 10);
-                if (py_value) {
-                    PyDict_SetItemString(data, "targetduration", py_value);
-                    Py_DECREF(py_value);
-                } else {
-                    PyErr_Clear();
-                }
+
+            /* Dispatch to handler via table lookup */
+            int dispatch_result = dispatch_tag(&ctx, stripped, line_len);
+            if (dispatch_result < 0) {
+                /* Handler returned error */
+                PyMem_Free(line_buf);
+                Py_DECREF(data);
+                Py_DECREF(state);
+                return NULL;
             }
-            else if (strcmp(tag, EXT_X_MEDIA_SEQUENCE) == 0) {
-                const char *value = stripped + strlen(EXT_X_MEDIA_SEQUENCE) + 1;
-                PyObject *py_value = PyLong_FromString(value, NULL, 10);
-                if (py_value) {
-                    PyDict_SetItemString(data, "media_sequence", py_value);
-                    Py_DECREF(py_value);
-                } else {
-                    PyErr_Clear();
-                }
-            }
-            else if (strcmp(tag, EXT_X_DISCONTINUITY_SEQUENCE) == 0) {
-                const char *value = stripped + strlen(EXT_X_DISCONTINUITY_SEQUENCE) + 1;
-                PyObject *py_value = PyLong_FromString(value, NULL, 10);
-                if (py_value) {
-                    PyDict_SetItemString(data, "discontinuity_sequence", py_value);
-                    Py_DECREF(py_value);
-                } else {
-                    PyErr_Clear();
-                }
-            }
-            else if (strcmp(tag, EXT_X_PROGRAM_DATE_TIME) == 0) {
-                if (parse_program_date_time(mod_state, stripped, data, state) < 0) {
-                    PyMem_Free(line_buf);
-                    Py_DECREF(data);
-                    Py_DECREF(state);
-                    return NULL;
-                }
-            }
-            else if (strcmp(tag, EXT_X_KEY) == 0) {
-                if (parse_key(mod_state, stripped, data, state) < 0) {
-                    PyMem_Free(line_buf);
-                    Py_DECREF(data);
-                    Py_DECREF(state);
-                    return NULL;
-                }
-            }
-            else if (strcmp(tag, EXTINF) == 0) {
-                if (parse_extinf(mod_state, stripped, state, ctx.lineno, strict) < 0) {
-                    PyMem_Free(line_buf);
-                    Py_DECREF(data);
-                    Py_DECREF(state);
-                    return NULL;
-                }
-                ctx.expect_segment = 1;  /* Shadow state for hot path */
-            }
-            else if (strcmp(tag, EXT_X_BYTERANGE) == 0) {
-                const char *value = stripped + strlen(EXT_X_BYTERANGE) + 1;
-                PyObject *segment = get_or_create_segment(mod_state, state);
-                if (!segment) {
-                    PyMem_Free(line_buf);
-                    Py_DECREF(data);
-                    Py_DECREF(state);
-                    return NULL;
-                }
-                PyObject *py_value = PyUnicode_FromString(value);
-                dict_set_interned(segment, mod_state->str_byterange, py_value);
-                Py_DECREF(py_value);
-                ctx.expect_segment = 1;  /* Shadow state for hot path */
-                dict_set_interned(state, mod_state->str_expect_segment, Py_True);
-            }
-            else if (strcmp(tag, EXT_X_BITRATE) == 0) {
-                const char *value = stripped + strlen(EXT_X_BITRATE) + 1;
-                PyObject *segment = get_or_create_segment(mod_state, state);
-                if (!segment) {
-                    PyMem_Free(line_buf);
-                    Py_DECREF(data);
-                    Py_DECREF(state);
-                    return NULL;
-                }
-                PyObject *py_value = PyLong_FromString(value, NULL, 10);
-                if (py_value) {
-                    dict_set_interned(segment, mod_state->str_bitrate, py_value);
-                    Py_DECREF(py_value);
-                } else {
-                    PyErr_Clear();
-                }
-            }
-            else if (strcmp(tag, EXT_X_STREAM_INF) == 0) {
-                ctx.expect_playlist = 1;  /* Shadow state for hot path */
-                dict_set_interned(state, mod_state->str_expect_playlist, Py_True);
-                PyDict_SetItemString(data, "is_variant", Py_True);
-                PyDict_SetItemString(data, "media_sequence", Py_None);
-                PyObject *stream_info = parse_typed_attribute_list(stripped, EXT_X_STREAM_INF,
-                    stream_inf_parsers, NUM_STREAM_INF_PARSERS);
-                if (stream_info) {
-                    PyDict_SetItemString(state, "stream_info", stream_info);
-                    Py_DECREF(stream_info);
-                }
-            }
-            else if (strcmp(tag, EXT_X_I_FRAME_STREAM_INF) == 0) {
-                PyObject *iframe_info = parse_typed_attribute_list(stripped, EXT_X_I_FRAME_STREAM_INF,
-                    iframe_stream_inf_parsers, NUM_IFRAME_STREAM_INF_PARSERS);
-                if (iframe_info) {
-                    PyObject *uri = PyDict_GetItemString(iframe_info, "uri");
-                    if (uri) {
-                        Py_INCREF(uri);  /* Keep uri alive before deleting from dict */
-                        PyDict_DelItemString(iframe_info, "uri");
-                        PyObject *playlist = PyDict_New();
-                        PyDict_SetItemString(playlist, "uri", uri);
-                        Py_DECREF(uri);  /* SetItemString increfs, so we can decref now */
-                        PyDict_SetItemString(playlist, "iframe_stream_info", iframe_info);
-                        PyObject *iframe_playlists = PyDict_GetItemString(data, "iframe_playlists");
-                        PyList_Append(iframe_playlists, playlist);
-                        Py_DECREF(playlist);
-                    }
-                    Py_DECREF(iframe_info);
-                }
-            }
-            else if (strcmp(tag, EXT_X_IMAGE_STREAM_INF) == 0) {
-                PyObject *image_info = parse_typed_attribute_list(stripped, EXT_X_IMAGE_STREAM_INF,
-                    image_stream_inf_parsers, NUM_IMAGE_STREAM_INF_PARSERS);
-                if (image_info) {
-                    PyObject *uri = PyDict_GetItemString(image_info, "uri");
-                    if (uri) {
-                        Py_INCREF(uri);  /* Keep uri alive before deleting from dict */
-                        PyDict_DelItemString(image_info, "uri");
-                        PyObject *playlist = PyDict_New();
-                        PyDict_SetItemString(playlist, "uri", uri);
-                        Py_DECREF(uri);  /* SetItemString increfs, so we can decref now */
-                        PyDict_SetItemString(playlist, "image_stream_info", image_info);
-                        PyObject *image_playlists = PyDict_GetItemString(data, "image_playlists");
-                        PyList_Append(image_playlists, playlist);
-                        Py_DECREF(playlist);
-                    }
-                    Py_DECREF(image_info);
-                }
-            }
-            else if (strcmp(tag, EXT_X_MEDIA) == 0) {
-                PyObject *media = parse_typed_attribute_list(stripped, EXT_X_MEDIA,
-                    media_parsers, NUM_MEDIA_PARSERS);
-                if (media) {
-                    PyObject *media_list = PyDict_GetItemString(data, "media");
-                    PyList_Append(media_list, media);
-                    Py_DECREF(media);
-                }
-            }
-            else if (strcmp(tag, EXT_X_PLAYLIST_TYPE) == 0) {
-                const char *value = stripped + strlen(EXT_X_PLAYLIST_TYPE) + 1;
-                char normalized[64];
-                size_t i;
-                for (i = 0; i < sizeof(normalized) - 1 && value[i]; i++) {
-                    normalized[i] = tolower((unsigned char)value[i]);
-                }
-                normalized[i] = '\0';
-                PyObject *py_value = PyUnicode_FromString(strip(normalized));
-                PyDict_SetItemString(data, "playlist_type", py_value);
-                Py_DECREF(py_value);
-            }
-            else if (strcmp(tag, EXT_X_VERSION) == 0) {
-                const char *value = stripped + strlen(EXT_X_VERSION) + 1;
-                PyObject *py_value = PyLong_FromString(value, NULL, 10);
-                if (py_value) {
-                    PyDict_SetItemString(data, "version", py_value);
-                    Py_DECREF(py_value);
-                } else {
-                    PyErr_Clear();
-                }
-            }
-            else if (strcmp(tag, EXT_X_ALLOW_CACHE) == 0) {
-                const char *value = stripped + strlen(EXT_X_ALLOW_CACHE) + 1;
-                char normalized[64];
-                size_t i;
-                for (i = 0; i < sizeof(normalized) - 1 && value[i]; i++) {
-                    normalized[i] = tolower((unsigned char)value[i]);
-                }
-                normalized[i] = '\0';
-                PyObject *py_value = PyUnicode_FromString(strip(normalized));
-                PyDict_SetItemString(data, "allow_cache", py_value);
-                Py_DECREF(py_value);
-            }
-            else if (strcmp(tag, EXT_I_FRAMES_ONLY) == 0) {
-                PyDict_SetItemString(data, "is_i_frames_only", Py_True);
-            }
-            else if (strcmp(tag, EXT_IS_INDEPENDENT_SEGMENTS) == 0) {
-                PyDict_SetItemString(data, "is_independent_segments", Py_True);
-            }
-            else if (strcmp(tag, EXT_X_ENDLIST) == 0) {
-                PyDict_SetItemString(data, "is_endlist", Py_True);
-            }
-            else if (strcmp(tag, EXT_X_IMAGES_ONLY) == 0) {
-                PyDict_SetItemString(data, "is_images_only", Py_True);
-            }
-            else if (strcmp(tag, EXT_X_DISCONTINUITY) == 0) {
-                PyDict_SetItemString(state, "discontinuity", Py_True);
-            }
-            else if (strcmp(tag, EXT_X_CUE_IN) == 0) {
-                PyDict_SetItemString(state, "cue_in", Py_True);
-            }
-            else if (strcmp(tag, EXT_X_CUE_SPAN) == 0) {
-                PyDict_SetItemString(state, "cue_out", Py_True);
-            }
-            else if (strcmp(tag, EXT_X_GAP) == 0) {
-                PyDict_SetItemString(state, "gap", Py_True);
-            }
-            else if (strcmp(tag, EXT_X_CUE_OUT) == 0) {
-                if (parse_cueout(stripped, state) < 0) {
-                    PyMem_Free(line_buf);
-                    Py_DECREF(data);
-                    Py_DECREF(state);
-                    return NULL;
-                }
-            }
-            else if (strcmp(tag, EXT_X_CUE_OUT_CONT) == 0) {
-                if (parse_cueout_cont(stripped, state) < 0) {
-                    PyMem_Free(line_buf);
-                    Py_DECREF(data);
-                    Py_DECREF(state);
-                    return NULL;
-                }
-            }
-            else if (strcmp(tag, EXT_OATCLS_SCTE35) == 0) {
-                const char *value = strchr(stripped, ':');
-                if (value) {
-                    value++;
-                    PyObject *py_value = PyUnicode_FromString(value);
-                    PyDict_SetItemString(state, "current_cue_out_oatcls_scte35", py_value);
-                    PyObject *current = PyDict_GetItemString(state, "current_cue_out_scte35");
-                    if (!current) {
-                        PyDict_SetItemString(state, "current_cue_out_scte35", py_value);
-                    }
-                    Py_DECREF(py_value);
-                }
-            }
-            else if (strcmp(tag, EXT_X_ASSET) == 0) {
-                PyObject *asset = parse_attribute_list(stripped, EXT_X_ASSET);
-                if (asset) {
-                    PyDict_SetItemString(state, "asset_metadata", asset);
-                    Py_DECREF(asset);
-                }
-            }
-            else if (strcmp(tag, EXT_X_MAP) == 0) {
-                PyObject *map_info = parse_typed_attribute_list(stripped, EXT_X_MAP,
-                    x_map_parsers, NUM_X_MAP_PARSERS);
-                if (map_info) {
-                    PyDict_SetItemString(state, "current_segment_map", map_info);
-                    PyObject *segment_map = PyDict_GetItemString(data, "segment_map");
-                    PyList_Append(segment_map, map_info);
-                    Py_DECREF(map_info);
-                }
-            }
-            else if (strcmp(tag, EXT_X_START) == 0) {
-                PyObject *start = parse_typed_attribute_list(stripped, EXT_X_START,
-                    start_parsers, NUM_START_PARSERS);
-                if (start) {
-                    PyDict_SetItemString(data, "start", start);
-                    Py_DECREF(start);
-                }
-            }
-            else if (strcmp(tag, EXT_X_SERVER_CONTROL) == 0) {
-                PyObject *server_control = parse_typed_attribute_list(stripped, EXT_X_SERVER_CONTROL,
-                    server_control_parsers, NUM_SERVER_CONTROL_PARSERS);
-                if (server_control) {
-                    PyDict_SetItemString(data, "server_control", server_control);
-                    Py_DECREF(server_control);
-                }
-            }
-            else if (strcmp(tag, EXT_X_PART_INF) == 0) {
-                PyObject *part_inf = parse_typed_attribute_list(stripped, EXT_X_PART_INF,
-                    part_inf_parsers, NUM_PART_INF_PARSERS);
-                if (part_inf) {
-                    PyDict_SetItemString(data, "part_inf", part_inf);
-                    Py_DECREF(part_inf);
-                }
-            }
-            else if (strcmp(tag, EXT_X_PART) == 0) {
-                if (parse_part(mod_state, stripped, state) < 0) {
-                    PyMem_Free(line_buf);
-                    Py_DECREF(data);
-                    Py_DECREF(state);
-                    return NULL;
-                }
-            }
-            else if (strcmp(tag, EXT_X_RENDITION_REPORT) == 0) {
-                PyObject *report = parse_typed_attribute_list(stripped, EXT_X_RENDITION_REPORT,
-                    rendition_report_parsers, NUM_RENDITION_REPORT_PARSERS);
-                if (report) {
-                    PyObject *rendition_reports = PyDict_GetItemString(data, "rendition_reports");
-                    PyList_Append(rendition_reports, report);
-                    Py_DECREF(report);
-                }
-            }
-            else if (strcmp(tag, EXT_X_SKIP) == 0) {
-                PyObject *skip = parse_typed_attribute_list(stripped, EXT_X_SKIP,
-                    skip_parsers, NUM_SKIP_PARSERS);
-                if (skip) {
-                    PyDict_SetItemString(data, "skip", skip);
-                    Py_DECREF(skip);
-                }
-            }
-            else if (strcmp(tag, EXT_X_SESSION_DATA) == 0) {
-                PyObject *session_data = parse_typed_attribute_list(stripped, EXT_X_SESSION_DATA,
-                    session_data_parsers, NUM_SESSION_DATA_PARSERS);
-                if (session_data) {
-                    PyObject *session_data_list = PyDict_GetItemString(data, "session_data");
-                    PyList_Append(session_data_list, session_data);
-                    Py_DECREF(session_data);
-                }
-            }
-            else if (strcmp(tag, EXT_X_SESSION_KEY) == 0) {
-                PyObject *raw_attrs = parse_attribute_list(stripped, EXT_X_SESSION_KEY);
-                if (raw_attrs) {
-                    PyObject *key = PyDict_New();
-                    if (key == NULL) {
-                        Py_DECREF(raw_attrs);
-                        PyMem_Free(line_buf);
-                        Py_DECREF(data);
-                        Py_DECREF(state);
-                        return NULL;
-                    }
-                    PyObject *k, *v;
-                    Py_ssize_t pos = 0;
-                    while (PyDict_Next(raw_attrs, &pos, &k, &v)) {
-                        PyObject *unquoted = remove_quotes_py(v);
-                        if (unquoted == NULL) {
-                            Py_DECREF(key);
-                            Py_DECREF(raw_attrs);
-                            PyMem_Free(line_buf);
-                            Py_DECREF(data);
-                            Py_DECREF(state);
-                            return NULL;
-                        }
-                        if (PyDict_SetItem(key, k, unquoted) < 0) {
-                            Py_DECREF(unquoted);
-                            Py_DECREF(key);
-                            Py_DECREF(raw_attrs);
-                            PyMem_Free(line_buf);
-                            Py_DECREF(data);
-                            Py_DECREF(state);
-                            return NULL;
-                        }
-                        Py_DECREF(unquoted);
-                    }
-                    Py_DECREF(raw_attrs);
-                    PyObject *session_keys = PyDict_GetItemString(data, "session_keys");
-                    PyList_Append(session_keys, key);
-                    Py_DECREF(key);
-                }
-            }
-            else if (strcmp(tag, EXT_X_PRELOAD_HINT) == 0) {
-                PyObject *preload_hint = parse_typed_attribute_list(stripped, EXT_X_PRELOAD_HINT,
-                    preload_hint_parsers, NUM_PRELOAD_HINT_PARSERS);
-                if (preload_hint) {
-                    PyDict_SetItemString(data, "preload_hint", preload_hint);
-                    Py_DECREF(preload_hint);
-                }
-            }
-            else if (strcmp(tag, EXT_X_DATERANGE) == 0) {
-                PyObject *daterange = parse_typed_attribute_list(stripped, EXT_X_DATERANGE,
-                    daterange_parsers, NUM_DATERANGE_PARSERS);
-                if (daterange) {
-                    /* Note: x_ attributes are already captured by parse_typed_attribute_list
-                       as ATTR_STRING (the default case for unknown attributes) */
-                    PyObject *dateranges = PyDict_GetItemString(state, "dateranges");
-                    if (!dateranges) {
-                        dateranges = PyList_New(0);
-                        PyDict_SetItemString(state, "dateranges", dateranges);
-                        Py_DECREF(dateranges);
-                        dateranges = PyDict_GetItemString(state, "dateranges");
-                    }
-                    PyList_Append(dateranges, daterange);
-                    Py_DECREF(daterange);
-                }
-            }
-            else if (strcmp(tag, EXT_X_CONTENT_STEERING) == 0) {
-                PyObject *content_steering = parse_typed_attribute_list(stripped, EXT_X_CONTENT_STEERING,
-                    content_steering_parsers, NUM_CONTENT_STEERING_PARSERS);
-                if (content_steering) {
-                    PyDict_SetItemString(data, "content_steering", content_steering);
-                    Py_DECREF(content_steering);
-                }
-            }
-            else if (strcmp(tag, EXT_X_TILES) == 0) {
-                PyObject *tiles = parse_typed_attribute_list(stripped, EXT_X_TILES,
-                    tiles_parsers, NUM_TILES_PARSERS);
-                if (tiles) {
-                    PyObject *tiles_list = PyDict_GetItemString(data, "tiles");
-                    PyList_Append(tiles_list, tiles);
-                    Py_DECREF(tiles);
-                }
-            }
-            else if (strcmp(tag, EXT_X_BLACKOUT) == 0) {
-                const char *colon = strchr(stripped, ':');
-                if (colon && *(colon + 1)) {
-                    PyObject *blackout_data = PyUnicode_FromString(colon + 1);
-                    PyDict_SetItemString(state, "blackout", blackout_data);
-                    Py_DECREF(blackout_data);
-                } else {
-                    PyDict_SetItemString(state, "blackout", Py_True);
-                }
-            }
-            else {
-                /* Unknown tag */
-                if (strict) {
+            if (dispatch_result == 0) {
+                /* Unknown tag - error in strict mode */
+                if (ctx.strict) {
                     raise_parse_error(mod_state, ctx.lineno, stripped);
                     PyMem_Free(line_buf);
                     Py_DECREF(data);
@@ -2742,7 +2930,7 @@ m3u8_parse(PyObject *module, PyObject *args, PyObject *kwargs)
                 }
                 ctx.expect_segment = 0;  /* parse_ts_chunk clears this */
             } else if (ctx.expect_playlist) {
-                if (parse_variant_playlist(stripped, data, state) < 0) {
+                if (parse_variant_playlist(mod_state, stripped, data, state) < 0) {
                     PyMem_Free(line_buf);
                     Py_DECREF(data);
                     Py_DECREF(state);
@@ -2762,11 +2950,15 @@ m3u8_parse(PyObject *module, PyObject *args, PyObject *kwargs)
 
     PyMem_Free(line_buf);
 
-    /* Handle remaining partial segment */
-    PyObject *segment = PyDict_GetItemString(state, "segment");
+    /* Handle remaining partial segment - use interned strings */
+    PyObject *segment = dict_get_interned(state, mod_state->str_segment);
     if (segment) {
-        PyObject *segments = PyDict_GetItemString(data, "segments");
-        PyList_Append(segments, segment);
+        PyObject *segments = dict_get_interned(data, mod_state->str_segments);
+        if (segments && PyList_Append(segments, segment) < 0) {
+            Py_DECREF(state);
+            Py_DECREF(data);
+            return NULL;
+        }
     }
 
     Py_DECREF(state);
@@ -2813,8 +3005,7 @@ static PyMethodDef m3u8_parser_methods[] = {
 };
 
 /*
- * Module traverse function for GC.
- * Visit all Python objects in module state.
+ * Module traverse function for GC - uses X-macro expansion.
  */
 static int
 m3u8_parser_traverse(PyObject *module, visitproc visit, void *arg)
@@ -2824,47 +3015,14 @@ m3u8_parser_traverse(PyObject *module, visitproc visit, void *arg)
     Py_VISIT(state->datetime_cls);
     Py_VISIT(state->timedelta_cls);
     Py_VISIT(state->fromisoformat_meth);
-    /* Interned strings are immortal in most cases, but visit for correctness */
-    Py_VISIT(state->str_segment);
-    Py_VISIT(state->str_segments);
-    Py_VISIT(state->str_duration);
-    Py_VISIT(state->str_uri);
-    Py_VISIT(state->str_title);
-    Py_VISIT(state->str_expect_segment);
-    Py_VISIT(state->str_expect_playlist);
-    Py_VISIT(state->str_current_key);
-    Py_VISIT(state->str_keys);
-    Py_VISIT(state->str_cue_out);
-    Py_VISIT(state->str_cue_in);
-    Py_VISIT(state->str_program_date_time);
-    Py_VISIT(state->str_current_program_date_time);
-    Py_VISIT(state->str_cue_out_start);
-    Py_VISIT(state->str_cue_out_explicitly_duration);
-    Py_VISIT(state->str_current_cue_out_scte35);
-    Py_VISIT(state->str_current_cue_out_oatcls_scte35);
-    Py_VISIT(state->str_current_cue_out_duration);
-    Py_VISIT(state->str_current_cue_out_elapsedtime);
-    Py_VISIT(state->str_scte35);
-    Py_VISIT(state->str_oatcls_scte35);
-    Py_VISIT(state->str_scte35_duration);
-    Py_VISIT(state->str_scte35_elapsedtime);
-    Py_VISIT(state->str_asset_metadata);
-    Py_VISIT(state->str_discontinuity);
-    Py_VISIT(state->str_key);
-    Py_VISIT(state->str_current_segment_map);
-    Py_VISIT(state->str_init_section);
-    Py_VISIT(state->str_dateranges);
-    Py_VISIT(state->str_gap);
-    Py_VISIT(state->str_gap_tag);
-    Py_VISIT(state->str_blackout);
-    Py_VISIT(state->str_byterange);
-    Py_VISIT(state->str_bitrate);
+    #define VISIT_INTERNED(name, str) Py_VISIT(state->name);
+    INTERNED_STRINGS(VISIT_INTERNED)
+    #undef VISIT_INTERNED
     return 0;
 }
 
 /*
- * Module clear function for GC.
- * Clear all Python objects in module state.
+ * Module clear function for GC - uses X-macro expansion.
  */
 static int
 m3u8_parser_clear(PyObject *module)
@@ -2874,41 +3032,9 @@ m3u8_parser_clear(PyObject *module)
     Py_CLEAR(state->datetime_cls);
     Py_CLEAR(state->timedelta_cls);
     Py_CLEAR(state->fromisoformat_meth);
-    /* Note: interned strings may be shared, Py_CLEAR handles this safely */
-    Py_CLEAR(state->str_segment);
-    Py_CLEAR(state->str_segments);
-    Py_CLEAR(state->str_duration);
-    Py_CLEAR(state->str_uri);
-    Py_CLEAR(state->str_title);
-    Py_CLEAR(state->str_expect_segment);
-    Py_CLEAR(state->str_expect_playlist);
-    Py_CLEAR(state->str_current_key);
-    Py_CLEAR(state->str_keys);
-    Py_CLEAR(state->str_cue_out);
-    Py_CLEAR(state->str_cue_in);
-    Py_CLEAR(state->str_program_date_time);
-    Py_CLEAR(state->str_current_program_date_time);
-    Py_CLEAR(state->str_cue_out_start);
-    Py_CLEAR(state->str_cue_out_explicitly_duration);
-    Py_CLEAR(state->str_current_cue_out_scte35);
-    Py_CLEAR(state->str_current_cue_out_oatcls_scte35);
-    Py_CLEAR(state->str_current_cue_out_duration);
-    Py_CLEAR(state->str_current_cue_out_elapsedtime);
-    Py_CLEAR(state->str_scte35);
-    Py_CLEAR(state->str_oatcls_scte35);
-    Py_CLEAR(state->str_scte35_duration);
-    Py_CLEAR(state->str_scte35_elapsedtime);
-    Py_CLEAR(state->str_asset_metadata);
-    Py_CLEAR(state->str_discontinuity);
-    Py_CLEAR(state->str_key);
-    Py_CLEAR(state->str_current_segment_map);
-    Py_CLEAR(state->str_init_section);
-    Py_CLEAR(state->str_dateranges);
-    Py_CLEAR(state->str_gap);
-    Py_CLEAR(state->str_gap_tag);
-    Py_CLEAR(state->str_blackout);
-    Py_CLEAR(state->str_byterange);
-    Py_CLEAR(state->str_bitrate);
+    #define CLEAR_INTERNED(name, str) Py_CLEAR(state->name);
+    INTERNED_STRINGS(CLEAR_INTERNED)
+    #undef CLEAR_INTERNED
     return 0;
 }
 
@@ -2953,40 +3079,9 @@ PyInit__m3u8_parser(void)
     state->datetime_cls = NULL;
     state->timedelta_cls = NULL;
     state->fromisoformat_meth = NULL;
-    state->str_segment = NULL;
-    state->str_segments = NULL;
-    state->str_duration = NULL;
-    state->str_uri = NULL;
-    state->str_title = NULL;
-    state->str_expect_segment = NULL;
-    state->str_expect_playlist = NULL;
-    state->str_current_key = NULL;
-    state->str_keys = NULL;
-    state->str_cue_out = NULL;
-    state->str_cue_in = NULL;
-    state->str_program_date_time = NULL;
-    state->str_current_program_date_time = NULL;
-    state->str_cue_out_start = NULL;
-    state->str_cue_out_explicitly_duration = NULL;
-    state->str_current_cue_out_scte35 = NULL;
-    state->str_current_cue_out_oatcls_scte35 = NULL;
-    state->str_current_cue_out_duration = NULL;
-    state->str_current_cue_out_elapsedtime = NULL;
-    state->str_scte35 = NULL;
-    state->str_oatcls_scte35 = NULL;
-    state->str_scte35_duration = NULL;
-    state->str_scte35_elapsedtime = NULL;
-    state->str_asset_metadata = NULL;
-    state->str_discontinuity = NULL;
-    state->str_key = NULL;
-    state->str_current_segment_map = NULL;
-    state->str_init_section = NULL;
-    state->str_dateranges = NULL;
-    state->str_gap = NULL;
-    state->str_gap_tag = NULL;
-    state->str_blackout = NULL;
-    state->str_byterange = NULL;
-    state->str_bitrate = NULL;
+    #define NULL_INTERNED(name, str) state->name = NULL;
+    INTERNED_STRINGS(NULL_INTERNED)
+    #undef NULL_INTERNED
 
     /* Import ParseError from m3u8.parser to use the same exception class */
     PyObject *parser_module = PyImport_ImportModule("m3u8.parser");
