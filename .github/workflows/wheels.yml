@@ -26,10 +26,10 @@ jobs:
           - os: ubuntu-latest
             archs: "x86_64 aarch64"
           # macOS x86_64 on Intel runner
-          - os: macos-latest
+          - os: macos-15-intel
             archs: "x86_64"
           # macOS arm64 on Apple Silicon runner  
-          - os: macos-14
+          - os: macos-latest
             archs: "arm64"
 
     steps:
