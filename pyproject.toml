@@ -39,3 +39,20 @@ zip-safe = false
 
 [tool.setuptools.package-data]
 "*" = ["*.c"]
+
+[tool.cibuildwheel]
+build = [
+    "cp310-*",
+    "cp311-*",
+    "cp312-*",
+    "cp313-*",
+    "cp314-*",
+]
+manylinux-x86_64-image = "manylinux2014"
+manylinux-aarch64-image = "manylinux2014"
+
+[tool.cibuildwheel.linux]
+archs = ["x86_64", "aarch64"]
+
+[tool.cibuildwheel.macos]
+archs = ["x86_64", "universal2", "arm64"]
