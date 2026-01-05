@@ -91,6 +91,10 @@ def parse(content, strict=False, custom_tags_parser=None):
             "strict": strict,
         }
 
+        # Blank lines are ignored.
+        if not line:
+            continue
+
         # Call custom parser if needed
         if line.startswith("#") and callable(custom_tags_parser):
             go_to_next_line = custom_tags_parser(line, lineno, data, state)
@@ -100,146 +104,27 @@ def parse(content, strict=False, custom_tags_parser=None):
             if go_to_next_line:
                 continue
 
-        if line.startswith(protocol.ext_x_byterange):
-            _parse_byterange(**parse_kwargs)
+        # Fast-path: dispatch based on tag token up to first ':' (or full tag if none)
+        if line.startswith("#"):
+            tag = line.split(":", 1)[0]
+            handler = DISPATCH.get(tag)
+            if handler is not None:
+                handler(**parse_kwargs)
+                continue
+            # #EXTM3U should be present; ignore if seen
+            if tag == protocol.ext_m3u:
+                continue
+            # In strict mode, unrecognized tags are illegal
+            if strict:
+                raise ParseError(lineno, line)
             continue
 
-        elif line.startswith(protocol.ext_x_bitrate):
-            _parse_bitrate(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_targetduration):
-            _parse_targetduration(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_media_sequence):
-            _parse_media_sequence(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_discontinuity_sequence):
-            _parse_discontinuity_sequence(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_program_date_time):
-            _parse_program_date_time(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_discontinuity):
-            _parse_discontinuity(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_cue_out_cont):
-            _parse_cueout_cont(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_cue_out):
-            _parse_cueout(**parse_kwargs)
-
-        elif line.startswith(f"{protocol.ext_oatcls_scte35}:"):
-            _parse_oatcls_scte35(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_blackout):
-            _parse_blackout(**parse_kwargs)
-
-        elif line.startswith(f"{protocol.ext_x_asset}:"):
-            _parse_asset(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_cue_in):
-            _parse_cue_in(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_cue_span):
-            _parse_cue_span(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_version):
-            _parse_version(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_allow_cache):
-            _parse_allow_cache(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_key):
-            _parse_key(**parse_kwargs)
-
-        elif line.startswith(protocol.extinf):
-            _parse_extinf(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_stream_inf):
-            _parse_stream_inf(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_i_frame_stream_inf):
-            _parse_i_frame_stream_inf(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_media):
-            _parse_media(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_playlist_type):
-            _parse_playlist_type(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_i_frames_only):
-            _parse_i_frames_only(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_is_independent_segments):
-            _parse_is_independent_segments(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_endlist):
-            _parse_endlist(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_map):
-            _parse_x_map(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_start):
-            _parse_start(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_server_control):
-            _parse_server_control(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_part_inf):
-            _parse_part_inf(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_rendition_report):
-            _parse_rendition_report(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_part):
-            _parse_part(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_skip):
-            _parse_skip(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_session_data):
-            _parse_session_data(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_session_key):
-            _parse_session_key(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_preload_hint):
-            _parse_preload_hint(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_daterange):
-            _parse_daterange(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_gap):
-            _parse_gap(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_content_steering):
-            _parse_content_steering(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_image_stream_inf):
-            _parse_image_stream_inf(**parse_kwargs)
-
-        elif line.startswith(protocol.ext_x_images_only):
-            _parse_is_images_only(**parse_kwargs)
-        elif line.startswith(protocol.ext_x_tiles):
-            _parse_tiles(**parse_kwargs)
-
-        # #EXTM3U should be present.
-        elif line.startswith(protocol.ext_m3u):
-            pass
-
-        # Blank lines are ignored.
-        elif line.strip() == "":
-            pass
-
         # Lines that don't start with # are either segments or playlists.
-        elif (not line.startswith("#")) and (state["expect_segment"]):
+        if state["expect_segment"]:
             _parse_ts_chunk(**parse_kwargs)
-
-        elif (not line.startswith("#")) and (state["expect_playlist"]):
+        elif state["expect_playlist"]:
             _parse_variant_playlist(**parse_kwargs)
-
-        # Lines that haven't been recognized by any of the parsers above are illegal
-        # in strict mode.
+        # In strict mode, any other content is illegal
         elif strict:
             raise ParseError(lineno, line)
 
@@ -349,35 +234,14 @@ def _parse_stream_inf(line, data, state, **kwargs):
     state["expect_playlist"] = True
     data["is_variant"] = True
     data["media_sequence"] = None
-    attribute_parser = remove_quotes_parser(
-        "codecs",
-        "audio",
-        "video",
-        "video_range",
-        "subtitles",
-        "pathway_id",
-        "stable_variant_id",
-    )
-    attribute_parser["program_id"] = int
-    attribute_parser["bandwidth"] = lambda x: int(float(x))
-    attribute_parser["average_bandwidth"] = int
-    attribute_parser["frame_rate"] = float
-    attribute_parser["hdcp_level"] = str
     state["stream_info"] = _parse_attribute_list(
-        protocol.ext_x_stream_inf, line, attribute_parser
+        protocol.ext_x_stream_inf, line, STREAM_INF_ATTRIBUTE_PARSER
     )
 
 
 def _parse_i_frame_stream_inf(line, data, **kwargs):
-    attribute_parser = remove_quotes_parser(
-        "codecs", "uri", "pathway_id", "stable_variant_id"
-    )
-    attribute_parser["program_id"] = int
-    attribute_parser["bandwidth"] = int
-    attribute_parser["average_bandwidth"] = int
-    attribute_parser["hdcp_level"] = str
     iframe_stream_info = _parse_attribute_list(
-        protocol.ext_x_i_frame_stream_inf, line, attribute_parser
+        protocol.ext_x_i_frame_stream_inf, line, IFRAME_STREAM_INF_ATTRIBUTE_PARSER
     )
     iframe_playlist = {
         "uri": iframe_stream_info.pop("uri"),
@@ -388,15 +252,8 @@ def _parse_i_frame_stream_inf(line, data, **kwargs):
 
 
 def _parse_image_stream_inf(line, data, **kwargs):
-    attribute_parser = remove_quotes_parser(
-        "codecs", "uri", "pathway_id", "stable_variant_id"
-    )
-    attribute_parser["program_id"] = int
-    attribute_parser["bandwidth"] = int
-    attribute_parser["average_bandwidth"] = int
-    attribute_parser["resolution"] = str
     image_stream_info = _parse_attribute_list(
-        protocol.ext_x_image_stream_inf, line, attribute_parser
+        protocol.ext_x_image_stream_inf, line, IMAGE_STREAM_INF_ATTRIBUTE_PARSER
     )
     image_playlist = {
         "uri": image_stream_info.pop("uri"),
@@ -411,29 +268,14 @@ def _parse_is_images_only(line, data, **kwargs):
 
 
 def _parse_tiles(line, data, state, **kwargs):
-    attribute_parser = remove_quotes_parser("uri")
-    attribute_parser["resolution"] = str
-    attribute_parser["layout"] = str
-    attribute_parser["duration"] = float
-    tiles_info = _parse_attribute_list(protocol.ext_x_tiles, line, attribute_parser)
+    tiles_info = _parse_attribute_list(
+        protocol.ext_x_tiles, line, TILES_ATTRIBUTE_PARSER
+    )
     data["tiles"].append(tiles_info)
 
 
 def _parse_media(line, data, **kwargs):
-    quoted = remove_quotes_parser(
-        "uri",
-        "group_id",
-        "language",
-        "assoc_language",
-        "name",
-        "instream_id",
-        "characteristics",
-        "channels",
-        "stable_rendition_id",
-        "thumbnails",
-        "image",
-    )
-    media = _parse_attribute_list(protocol.ext_x_media, line, quoted)
+    media = _parse_attribute_list(protocol.ext_x_media, line, MEDIA_ATTRIBUTE_PARSER)
     data["media"].append(media)
 
 
@@ -503,15 +345,17 @@ def _parse_playlist_type(line, data, **kwargs):
 
 
 def _parse_x_map(line, data, state, **kwargs):
-    quoted_parser = remove_quotes_parser("uri", "byterange")
-    segment_map_info = _parse_attribute_list(protocol.ext_x_map, line, quoted_parser)
+    segment_map_info = _parse_attribute_list(
+        protocol.ext_x_map, line, X_MAP_ATTRIBUTE_PARSER
+    )
     state["current_segment_map"] = segment_map_info
     data["segment_map"].append(segment_map_info)
 
 
 def _parse_start(line, data, **kwargs):
-    attribute_parser = {"time_offset": lambda x: float(x)}
-    start_info = _parse_attribute_list(protocol.ext_x_start, line, attribute_parser)
+    start_info = _parse_attribute_list(
+        protocol.ext_x_start, line, START_ATTRIBUTE_PARSER
+    )
     data["start"] = start_info
 
 
@@ -574,7 +418,7 @@ def _parse_cueout_cont(line, state, **kwargs):
     cue_info = _parse_attribute_list(
         protocol.ext_x_cue_out_cont,
         line,
-        remove_quotes_parser("duration", "elapsedtime", "scte35"),
+        CUEOUT_CONT_ATTRIBUTE_PARSER,
     )
 
     # EXT-X-CUE-OUT-CONT:2.436/120 style
@@ -613,7 +457,7 @@ def _parse_cueout(line, state, **kwargs):
     cue_info = _parse_attribute_list(
         protocol.ext_x_cue_out,
         line,
-        remove_quotes_parser("cue"),
+        CUEOUT_ATTRIBUTE_PARSER,
     )
     cue_out_scte35 = cue_info.get("cue")
     cue_out_duration = cue_info.get("duration") or cue_info.get("")
@@ -624,47 +468,27 @@ def _parse_cueout(line, state, **kwargs):
 
 
 def _parse_server_control(line, data, **kwargs):
-    attribute_parser = {
-        "can_block_reload": str,
-        "hold_back": lambda x: float(x),
-        "part_hold_back": lambda x: float(x),
-        "can_skip_until": lambda x: float(x),
-        "can_skip_dateranges": str,
-    }
-
     data["server_control"] = _parse_attribute_list(
-        protocol.ext_x_server_control, line, attribute_parser
+        protocol.ext_x_server_control, line, SERVER_CONTROL_ATTRIBUTE_PARSER
     )
 
 
 def _parse_part_inf(line, data, **kwargs):
-    attribute_parser = {"part_target": lambda x: float(x)}
-
     data["part_inf"] = _parse_attribute_list(
-        protocol.ext_x_part_inf, line, attribute_parser
+        protocol.ext_x_part_inf, line, PART_INF_ATTRIBUTE_PARSER
     )
 
 
 def _parse_rendition_report(line, data, **kwargs):
-    attribute_parser = remove_quotes_parser("uri")
-    attribute_parser["last_msn"] = int
-    attribute_parser["last_part"] = int
-
     rendition_report = _parse_attribute_list(
-        protocol.ext_x_rendition_report, line, attribute_parser
+        protocol.ext_x_rendition_report, line, RENDITION_REPORT_ATTRIBUTE_PARSER
     )
 
     data["rendition_reports"].append(rendition_report)
 
 
 def _parse_part(line, state, **kwargs):
-    attribute_parser = remove_quotes_parser("uri")
-    attribute_parser["duration"] = lambda x: float(x)
-    attribute_parser["independent"] = str
-    attribute_parser["gap"] = str
-    attribute_parser["byterange"] = str
-
-    part = _parse_attribute_list(protocol.ext_x_part, line, attribute_parser)
+    part = _parse_attribute_list(protocol.ext_x_part, line, PART_ATTRIBUTE_PARSER)
 
     # this should always be true according to spec
     if state.get("current_program_date_time"):
@@ -684,15 +508,15 @@ def _parse_part(line, state, **kwargs):
 
 
 def _parse_skip(line, data, **parse_kwargs):
-    attribute_parser = remove_quotes_parser("recently_removed_dateranges")
-    attribute_parser["skipped_segments"] = int
-
-    data["skip"] = _parse_attribute_list(protocol.ext_x_skip, line, attribute_parser)
+    data["skip"] = _parse_attribute_list(
+        protocol.ext_x_skip, line, SKIP_ATTRIBUTE_PARSER
+    )
 
 
 def _parse_session_data(line, data, **kwargs):
-    quoted = remove_quotes_parser("data_id", "value", "uri", "language")
-    session_data = _parse_attribute_list(protocol.ext_x_session_data, line, quoted)
+    session_data = _parse_attribute_list(
+        protocol.ext_x_session_data, line, SESSION_DATA_ATTRIBUTE_PARSER
+    )
     data["session_data"].append(session_data)
 
 
@@ -708,26 +532,15 @@ def _parse_session_key(line, data, **kwargs):
 
 
 def _parse_preload_hint(line, data, **kwargs):
-    attribute_parser = remove_quotes_parser("uri")
-    attribute_parser["type"] = str
-    attribute_parser["byterange_start"] = int
-    attribute_parser["byterange_length"] = int
-
     data["preload_hint"] = _parse_attribute_list(
-        protocol.ext_x_preload_hint, line, attribute_parser
+        protocol.ext_x_preload_hint, line, PRELOAD_HINT_ATTRIBUTE_PARSER
     )
 
 
 def _parse_daterange(line, state, **kwargs):
-    attribute_parser = remove_quotes_parser("id", "class", "start_date", "end_date")
-    attribute_parser["duration"] = float
-    attribute_parser["planned_duration"] = float
-    attribute_parser["end_on_next"] = str
-    attribute_parser["scte35_cmd"] = str
-    attribute_parser["scte35_out"] = str
-    attribute_parser["scte35_in"] = str
-
-    parsed = _parse_attribute_list(protocol.ext_x_daterange, line, attribute_parser)
+    parsed = _parse_attribute_list(
+        protocol.ext_x_daterange, line, DATERANGE_ATTRIBUTE_PARSER
+    )
 
     if "dateranges" not in state:
         state["dateranges"] = []
@@ -736,10 +549,8 @@ def _parse_daterange(line, state, **kwargs):
 
 
 def _parse_content_steering(line, data, **kwargs):
-    attribute_parser = remove_quotes_parser("server_uri", "pathway_id")
-
     data["content_steering"] = _parse_attribute_list(
-        protocol.ext_x_content_steering, line, attribute_parser
+        protocol.ext_x_content_steering, line, CONTENT_STEERING_ATTRIBUTE_PARSER
     )
 
 
@@ -810,3 +621,165 @@ def save_segment_custom_value(state, key, value):
         state["segment"]["custom_parser_values"] = {}
 
     state["segment"]["custom_parser_values"][key] = value
+
+
+# Attribute parser constants (built once)
+STREAM_INF_ATTRIBUTE_PARSER = remove_quotes_parser(
+    "codecs",
+    "audio",
+    "video",
+    "video_range",
+    "subtitles",
+    "pathway_id",
+    "stable_variant_id",
+)
+STREAM_INF_ATTRIBUTE_PARSER.update(
+    {
+        "program_id": int,
+        "bandwidth": lambda x: int(float(x)),
+        "average_bandwidth": int,
+        "frame_rate": float,
+        "hdcp_level": str,
+    }
+)
+
+IFRAME_STREAM_INF_ATTRIBUTE_PARSER = remove_quotes_parser(
+    "codecs", "uri", "pathway_id", "stable_variant_id"
+)
+IFRAME_STREAM_INF_ATTRIBUTE_PARSER.update(
+    {
+        "program_id": int,
+        "bandwidth": int,
+        "average_bandwidth": int,
+        "hdcp_level": str,
+    }
+)
+
+IMAGE_STREAM_INF_ATTRIBUTE_PARSER = remove_quotes_parser(
+    "codecs", "uri", "pathway_id", "stable_variant_id"
+)
+IMAGE_STREAM_INF_ATTRIBUTE_PARSER.update(
+    {
+        "program_id": int,
+        "bandwidth": int,
+        "average_bandwidth": int,
+        "resolution": str,
+    }
+)
+
+MEDIA_ATTRIBUTE_PARSER = remove_quotes_parser(
+    "uri",
+    "group_id",
+    "language",
+    "assoc_language",
+    "name",
+    "instream_id",
+    "characteristics",
+    "channels",
+    "stable_rendition_id",
+    "thumbnails",
+    "image",
+)
+
+X_MAP_ATTRIBUTE_PARSER = remove_quotes_parser("uri", "byterange")
+
+START_ATTRIBUTE_PARSER = {"time_offset": lambda x: float(x)}
+
+SERVER_CONTROL_ATTRIBUTE_PARSER = {
+    "can_block_reload": str,
+    "hold_back": lambda x: float(x),
+    "part_hold_back": lambda x: float(x),
+    "can_skip_until": lambda x: float(x),
+    "can_skip_dateranges": str,
+}
+
+PART_INF_ATTRIBUTE_PARSER = {"part_target": lambda x: float(x)}
+
+RENDITION_REPORT_ATTRIBUTE_PARSER = remove_quotes_parser("uri")
+RENDITION_REPORT_ATTRIBUTE_PARSER.update({"last_msn": int, "last_part": int})
+
+PART_ATTRIBUTE_PARSER = remove_quotes_parser("uri")
+PART_ATTRIBUTE_PARSER.update(
+    {"duration": lambda x: float(x), "independent": str, "gap": str, "byterange": str}
+)
+
+SKIP_ATTRIBUTE_PARSER = remove_quotes_parser("recently_removed_dateranges")
+SKIP_ATTRIBUTE_PARSER.update({"skipped_segments": int})
+
+SESSION_DATA_ATTRIBUTE_PARSER = remove_quotes_parser(
+    "data_id", "value", "uri", "language"
+)
+
+PRELOAD_HINT_ATTRIBUTE_PARSER = remove_quotes_parser("uri")
+PRELOAD_HINT_ATTRIBUTE_PARSER.update(
+    {"type": str, "byterange_start": int, "byterange_length": int}
+)
+
+DATERANGE_ATTRIBUTE_PARSER = remove_quotes_parser(
+    "id", "class", "start_date", "end_date"
+)
+DATERANGE_ATTRIBUTE_PARSER.update(
+    {
+        "duration": float,
+        "planned_duration": float,
+        "end_on_next": str,
+        "scte35_cmd": str,
+        "scte35_out": str,
+        "scte35_in": str,
+    }
+)
+
+CONTENT_STEERING_ATTRIBUTE_PARSER = remove_quotes_parser("server_uri", "pathway_id")
+
+CUEOUT_CONT_ATTRIBUTE_PARSER = remove_quotes_parser("duration", "elapsedtime", "scte35")
+
+CUEOUT_ATTRIBUTE_PARSER = remove_quotes_parser("cue")
+
+TILES_ATTRIBUTE_PARSER = remove_quotes_parser("uri")
+TILES_ATTRIBUTE_PARSER.update({"resolution": str, "layout": str, "duration": float})
+
+
+# Single token-to-handler dispatch to avoid a long startswith chain
+DISPATCH = {
+    protocol.ext_x_byterange: _parse_byterange,
+    protocol.ext_x_bitrate: _parse_bitrate,
+    protocol.ext_x_targetduration: _parse_targetduration,
+    protocol.ext_x_media_sequence: _parse_media_sequence,
+    protocol.ext_x_discontinuity_sequence: _parse_discontinuity_sequence,
+    protocol.ext_x_program_date_time: _parse_program_date_time,
+    protocol.ext_x_discontinuity: _parse_discontinuity,
+    protocol.ext_x_cue_out_cont: _parse_cueout_cont,
+    protocol.ext_x_cue_out: _parse_cueout,
+    protocol.ext_oatcls_scte35: _parse_oatcls_scte35,
+    protocol.ext_x_asset: _parse_asset,
+    protocol.ext_x_cue_in: _parse_cue_in,
+    protocol.ext_x_cue_span: _parse_cue_span,
+    protocol.ext_x_version: _parse_version,
+    protocol.ext_x_allow_cache: _parse_allow_cache,
+    protocol.ext_x_key: _parse_key,
+    protocol.extinf: _parse_extinf,
+    protocol.ext_x_stream_inf: _parse_stream_inf,
+    protocol.ext_x_i_frame_stream_inf: _parse_i_frame_stream_inf,
+    protocol.ext_x_media: _parse_media,
+    protocol.ext_x_playlist_type: _parse_playlist_type,
+    protocol.ext_i_frames_only: _parse_i_frames_only,
+    protocol.ext_is_independent_segments: _parse_is_independent_segments,
+    protocol.ext_x_endlist: _parse_endlist,
+    protocol.ext_x_map: _parse_x_map,
+    protocol.ext_x_start: _parse_start,
+    protocol.ext_x_server_control: _parse_server_control,
+    protocol.ext_x_part_inf: _parse_part_inf,
+    protocol.ext_x_rendition_report: _parse_rendition_report,
+    protocol.ext_x_part: _parse_part,
+    protocol.ext_x_skip: _parse_skip,
+    protocol.ext_x_session_data: _parse_session_data,
+    protocol.ext_x_session_key: _parse_session_key,
+    protocol.ext_x_preload_hint: _parse_preload_hint,
+    protocol.ext_x_daterange: _parse_daterange,
+    protocol.ext_x_gap: _parse_gap,
+    protocol.ext_x_content_steering: _parse_content_steering,
+    protocol.ext_x_image_stream_inf: _parse_image_stream_inf,
+    protocol.ext_x_images_only: _parse_is_images_only,
+    protocol.ext_x_tiles: _parse_tiles,
+    protocol.ext_x_blackout: _parse_blackout,
+}

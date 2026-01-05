@@ -507,6 +507,16 @@ def test_should_parse_multiple_map_attributes():
     assert data["segments"][2]["init_section"]["uri"] == "init3.mp4"
 
 
+def test_should_parse_empty_map_tag():
+    data = m3u8.parse(playlists.EMPTY_MAP_TAG_PLAYLIST)
+
+    # Empty MAP tag should result in an empty dict in segment_map
+    assert data["segment_map"] == [{}]
+    # But segments should not have init_section set (empty dict is falsy)
+    assert "init_section" not in data["segments"][0]
+    assert "init_section" not in data["segments"][1]
+
+
 def test_should_parse_empty_uri_with_base_path():
     data = m3u8.M3U8(
         playlists.MEDIA_WITHOUT_URI_PLAYLIST, base_path="base_path", base_uri="base_uri"

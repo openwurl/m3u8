@@ -31,7 +31,14 @@ from m3u8.model import (
     Start,
     Tiles,
 )
-from m3u8.parser import ParseError, parse
+from m3u8.parser import parse, ParseError
+
+# Try to import the C extension for faster parsing, fall back to Python
+if os.environ.get("M3U8_NO_C_EXTENSION", "") != "1":
+    try:
+        from m3u8._m3u8_parser import parse
+    except ImportError:
+        pass
 
 __all__ = (
     "M3U8",

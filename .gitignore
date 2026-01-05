@@ -1,5 +1,9 @@
+.DS_Store
 *.pyc
 *.egg-info
+*.so
+*.o
+*.dylib
 tests/server.stdout
 dist/
 build/
