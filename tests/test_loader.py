@@ -1,4 +1,5 @@
 # Copyright 2014 Globo.com Player authors. All rights reserved.
+# Modifications Copyright (c) 2026 Wurl.
 # Use of this source code is governed by a MIT License
 # license that can be found in the LICENSE file.
 
@@ -9,7 +10,7 @@ import unittest.mock
 
 import pytest
 
-import m3u8
+import openm3u8 as m3u8
 import playlists
 
 

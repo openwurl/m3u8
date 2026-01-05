@@ -1,4 +1,5 @@
 # Copyright 2014 Globo.com Player authors. All rights reserved.
+# Modifications Copyright (c) 2026 Wurl.
 # Use of this source code is governed by a MIT License
 # license that can be found in the LICENSE file.
 import re
@@ -6,8 +7,8 @@ import re
 import playlists
 import pytest
 
-import m3u8
-from m3u8.parser import (
+import openm3u8 as m3u8
+from openm3u8.parser import (
     ParseError,
     _parse_simple_parameter_raw_value,
     cast_date_time,

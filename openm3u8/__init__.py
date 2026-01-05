@@ -1,12 +1,13 @@
 # Copyright 2014 Globo.com Player authors. All rights reserved.
+# Modifications Copyright (c) 2026 Wurl.
 # Use of this source code is governed by a MIT License
 # license that can be found in the LICENSE file.
 
 import os
 from urllib.parse import urljoin, urlsplit
 
-from m3u8.httpclient import DefaultHTTPClient
-from m3u8.model import (
+from openm3u8.httpclient import DefaultHTTPClient
+from openm3u8.model import (
     M3U8,
     ContentSteering,
     DateRange,
@@ -31,12 +32,12 @@ from m3u8.model import (
     Start,
     Tiles,
 )
-from m3u8.parser import parse, ParseError
+from openm3u8.parser import parse, ParseError
 
 # Try to import the C extension for faster parsing, fall back to Python
 if os.environ.get("M3U8_NO_C_EXTENSION", "") != "1":
     try:
-        from m3u8._m3u8_parser import parse
+        from openm3u8._m3u8_parser import parse
     except ImportError:
         pass
 

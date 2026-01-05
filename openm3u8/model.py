@@ -1,20 +1,21 @@
 # Copyright 2014 Globo.com Player authors. All rights reserved.
+# Modifications Copyright (c) 2026 Wurl.
 # Use of this source code is governed by a MIT License
 # license that can be found in the LICENSE file.
 import decimal
 import os
 
-from m3u8.mixins import BasePathMixin, GroupedBasePathMixin
-from m3u8.parser import parse, format_date_time
+from openm3u8.mixins import BasePathMixin, GroupedBasePathMixin
+from openm3u8.parser import parse, format_date_time
 
 # Try to import the C extension for faster parsing, fall back to Python
 if os.environ.get("M3U8_NO_C_EXTENSION", "") != "1":
     try:
-        from m3u8._m3u8_parser import parse
+        from openm3u8._m3u8_parser import parse
     except ImportError:
         pass
 
-from m3u8.protocol import (
+from openm3u8.protocol import (
     ext_oatcls_scte35,
     ext_x_asset,
     ext_x_key,

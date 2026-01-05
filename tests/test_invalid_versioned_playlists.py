@@ -1,7 +1,7 @@
 import invalid_versioned_playlists
 import pytest
 
-import m3u8
+import openm3u8 as m3u8
 
 
 def test_should_fail_if_iv_in_EXT_X_KEY_and_version_less_than_2():

@@ -3,13 +3,13 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "m3u8"
-version = "6.3.0"
+name = "openm3u8"
+version = "7.0.0"
 description = "Python m3u8 parser"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [
-    { name = "Globo.com" }
+    { name = "wurl.com" }
 ]
 requires-python = ">=3.10"
 classifiers = [
@@ -34,7 +34,7 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["m3u8"]
+packages = ["openm3u8"]
 zip-safe = false
 
 [tool.setuptools.package-data]

@@ -1,4 +1,5 @@
 # Copyright 2014 Globo.com Player authors. All rights reserved.
+# Modifications Copyright (c) 2026 Wurl.
 # Use of this source code is governed by a MIT License
 # license that can be found in the LICENSE file.
 
@@ -12,8 +13,8 @@ import textwrap
 import playlists
 import pytest
 
-import m3u8
-from m3u8.model import (
+import openm3u8 as m3u8
+from openm3u8.model import (
     DateRange,
     Key,
     Media,
@@ -26,7 +27,7 @@ from m3u8.model import (
     denormalize_attribute,
     find_key,
 )
-from m3u8.protocol import ext_x_part, ext_x_preload_hint, ext_x_start
+from openm3u8.protocol import ext_x_part, ext_x_preload_hint, ext_x_start
 
 utc = datetime.timezone.utc
 

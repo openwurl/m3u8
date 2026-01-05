@@ -1,5 +1,6 @@
 /*
  * Copyright 2014 Globo.com Player authors. All rights reserved.
+ * Modifications Copyright (c) 2026 Wurl.
  * Use of this source code is governed by a MIT License
  * license that can be found in the LICENSE file.
  *
@@ -2698,7 +2699,7 @@ m3u8_parse(PyObject *module, PyObject *args, PyObject *kwargs)
     /* Check strict mode validation */
     if (strict) {
         /* Import and call version_matching.validate */
-        PyObject *version_matching = PyImport_ImportModule("m3u8.version_matching");
+        PyObject *version_matching = PyImport_ImportModule("openm3u8.version_matching");
         if (version_matching == NULL) {
             return NULL;
         }
@@ -2968,7 +2969,7 @@ static PyMethodDef m3u8_parser_methods[] = {
      "--\n\n"
      "Parse M3U8 playlist content and return a dictionary with all data found.\n\n"
      "This is an optimized C implementation that produces output identical to\n"
-     "the pure Python parser in m3u8.parser.parse().\n\n"
+     "the pure Python parser in openm3u8.parser.parse().\n\n"
      "Parameters\n"
      "----------\n"
      "content : str\n"
@@ -2991,7 +2992,7 @@ static PyMethodDef m3u8_parser_methods[] = {
      "    If strict=True and version validation fails.\n\n"
      "Examples\n"
      "--------\n"
-     ">>> from m3u8._m3u8_parser import parse\n"
+     ">>> from openm3u8._m3u8_parser import parse\n"
      ">>> result = parse('#EXTM3U\\n#EXTINF:10,\\nfoo.ts')\n"
      ">>> len(result['segments'])\n"
      "1\n"
@@ -3078,8 +3079,8 @@ PyInit__m3u8_parser(void)
     INTERNED_STRINGS(NULL_INTERNED)
     #undef NULL_INTERNED
 
-    /* Import ParseError from m3u8.parser to use the same exception class */
-    PyObject *parser_module = PyImport_ImportModule("m3u8.parser");
+    /* Import ParseError from openm3u8.parser to use the same exception class */
+    PyObject *parser_module = PyImport_ImportModule("openm3u8.parser");
     if (parser_module != NULL) {
         state->ParseError = PyObject_GetAttrString(parser_module, "ParseError");
         Py_DECREF(parser_module);
@@ -3089,7 +3090,7 @@ PyInit__m3u8_parser(void)
     if (state->ParseError == NULL) {
         PyErr_Clear();
         state->ParseError = PyErr_NewException(
-            "m3u8._m3u8_parser.ParseError", PyExc_Exception, NULL);
+            "openm3u8._m3u8_parser.ParseError", PyExc_Exception, NULL);
         if (state->ParseError == NULL) {
             goto error;
         }

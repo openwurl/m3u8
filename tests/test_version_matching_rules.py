@@ -1,4 +1,4 @@
-from m3u8.version_matching_rules import (
+from openm3u8.version_matching_rules import (
     ValidEXTXBYTERANGEOrEXTXIFRAMESONLY,
     ValidFloatingPointEXTINF,
     ValidIVInEXTXKEY,

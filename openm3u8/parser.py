@@ -1,4 +1,5 @@
 # Copyright 2014 Globo.com Player authors. All rights reserved.
+# Modifications Copyright (c) 2026 Wurl.
 # Use of this source code is governed by a MIT License
 # license that can be found in the LICENSE file.
 
@@ -14,7 +15,7 @@ except ImportError:
     pass
 
 
-from m3u8 import protocol, version_matching
+from openm3u8 import protocol, version_matching
 
 """
 http://tools.ietf.org/html/draft-pantos-http-live-streaming-08#section-3.2

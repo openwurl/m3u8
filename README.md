@@ -1,8 +1,8 @@
-![image](https://github.com/globocom/m3u8/actions/workflows/main.yml/badge.svg) [![image](https://badge.fury.io/py/m3u8.svg)](https://badge.fury.io/py/m3u8)
+# openm3u8
 
-# m3u8
+`openm3u8` is a Python library for parsing m3u8 files [HTTP Live Streaming  (HLS)](https://tools.ietf.org/html/rfc8216) playlists.
 
-Python [m3u8](https://tools.ietf.org/html/rfc8216) parser.
+This project is a fork of [m3u8](https://github.com/globocom/m3u8/) maintained by [Wurl](https://www.wurl.com/).
 
 # Documentation
 
@@ -12,15 +12,15 @@ To load a playlist into an object from uri, file path or directly from
 string, use the `load/loads` functions:
 
 ```python
-import m3u8
+import openm3u8
 
-playlist = m3u8.load('http://videoserver.com/playlist.m3u8')  # this could also be an absolute filename
+playlist = openm3u8.load('http://videoserver.com/playlist.m3u8')  # this could also be an absolute filename
 print(playlist.segments)
 print(playlist.target_duration)
 
 # if you already have the content as string, use
 
-playlist = m3u8.loads('#EXTM3U8 ... etc ... ')
+playlist = openm3u8.loads('#EXTM3U8 ... etc ... ')
 ```
 
 ## Dumping a playlist
@@ -29,9 +29,9 @@ To dump a playlist from an object to the console or a file, use the
 `dump/dumps` functions:
 
 ``` python
-import m3u8
+import openm3u8
 
-playlist = m3u8.load('http://videoserver.com/playlist.m3u8')
+playlist = openm3u8.load('http://videoserver.com/playlist.m3u8')
 print(playlist.dumps())
 
 # if you want to write a file from its content
@@ -80,10 +80,6 @@ playlist.dump('playlist.m3u8')
 -   [\#EXT-X-DATERANGE](https://tools.ietf.org/html/rfc8216#section-4.3.2.7)
 -   [\#EXT-X-GAP](https://tools.ietf.org/html/draft-pantos-hls-rfc8216bis-05#section-4.4.2.7)
 -   [\#EXT-X-CONTENT-STEERING](https://tools.ietf.org/html/draft-pantos-hls-rfc8216bis-10#section-4.4.6.64)
-
-# Frequently Asked Questions
-
--   [FAQ](https://github.com/globocom/m3u8/wiki/FAQ)
 
 # Running Tests
 

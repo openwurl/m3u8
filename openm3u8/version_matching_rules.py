@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from m3u8 import protocol
+from openm3u8 import protocol
 
 
 @dataclass

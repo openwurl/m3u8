@@ -30,8 +30,8 @@ if (
 
     ext_modules.append(
         Extension(
-            "m3u8._m3u8_parser",
-            sources=["m3u8/_m3u8_parser.c"],
+            "openm3u8._m3u8_parser",
+            sources=["openm3u8/_m3u8_parser.c"],
             optional=not is_wheel_build,  # Required for wheels, optional otherwise
             py_limited_api=True,
             define_macros=[("Py_LIMITED_API", PY_LIMITED_API)],
