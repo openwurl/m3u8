@@ -40,5 +40,5 @@ jobs:
         uses: actions/upload-artifact/merge@v4
         with:
           name: artifact
-          pattern: artifact-*
+          pattern: m3u8-*
           delete-merged: true
