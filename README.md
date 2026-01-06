@@ -1,8 +1,8 @@
 # openm3u8
 
-`openm3u8` is a Python library for parsing m3u8 files [HTTP Live Streaming  (HLS)](https://tools.ietf.org/html/rfc8216) playlists.
+`openm3u8` is a Python library for parsing .m3u8 files, which are used as [HTTP Live Streaming (HLS)](https://tools.ietf.org/html/rfc8216) playlists.
 
-This project is a fork of [m3u8](https://github.com/globocom/m3u8/) maintained by [Wurl](https://www.wurl.com/).
+This project is a fork of [m3u8](https://github.com/globocom/m3u8/) and is maintained by [Wurl](https://www.wurl.com/).
 
 # Documentation
 
