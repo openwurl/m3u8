@@ -1,5 +1,5 @@
-from m3u8 import protocol
-from m3u8.version_matching_rules import VersionMatchingError, available_rules
+from openm3u8 import protocol
+from openm3u8.version_matching_rules import VersionMatchingError, available_rules
 
 
 def get_version(file_lines: list[str]):

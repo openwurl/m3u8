@@ -1,12 +1,12 @@
 # Copyright 2014 Globo.com Player authors. All rights reserved.
+# Modifications Copyright (c) 2026 Wurl.
 # Use of this source code is governed by a MIT License
 # license that can be found in the LICENSE file.
 
 import invalid_versioned_playlists
 import pytest
 
-import m3u8
-import m3u8.version_matching_rules
+import openm3u8 as m3u8
 
 
 @pytest.mark.xfail

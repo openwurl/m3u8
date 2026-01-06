@@ -3,7 +3,7 @@ import unittest
 from http.client import HTTPResponse
 from unittest.mock import Mock, patch
 
-from m3u8.httpclient import DefaultHTTPClient
+from openm3u8.httpclient import DefaultHTTPClient
 
 
 class MockHeaders:

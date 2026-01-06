@@ -1,10 +1,10 @@
 import pytest
 
-import m3u8.parser as py_parser
+import openm3u8.parser as py_parser
 
 
 try:
-    import m3u8._m3u8_parser as c_parser
+    import openm3u8._m3u8_parser as c_parser
 except ImportError:  # pragma: no cover
     c_parser = None
 
